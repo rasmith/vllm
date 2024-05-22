@@ -1,5 +1,6 @@
 import enum
 import json
+import os
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING, ClassVar, List, Optional, Tuple, Union
 
@@ -547,7 +548,7 @@ class ParallelConfig:
                                  f"'{self.distributed_executor_backend}'.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
-            if is_hip() and not self.worker_use_ray:
+            if is_hip() and not worker_use_ray:
                 logger.info("Using torchrun for multi-GPU on "
                             "ROCM platform. Use --worker-use-ray "
                             "to override")

@@ -3,13 +3,13 @@ from typing import Dict, List, Optional
 
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoRAConfig, ModelConfig,
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, SpeculativeConfig,
                          VisionLanguageConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
-from vllm.model_executor.parallel_utils.communication_op import (
+from vllm.distributed.communication_op import (
     broadcast_object_list, tensor_model_parallel_all_gather)
 from vllm.sequence import SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
@@ -30,6 +30,7 @@ class TorchrunGPUExecutor(GPUExecutor):
                  parallel_config: ParallelConfig,
                  scheduler_config: SchedulerConfig,
                  device_config: DeviceConfig,
+                 load_config: LoadConfig,
                  lora_config: Optional[LoRAConfig],
                  vision_language_config: Optional[VisionLanguageConfig],
                  speculative_config: Optional[SpeculativeConfig]) -> None:
@@ -37,7 +38,7 @@ class TorchrunGPUExecutor(GPUExecutor):
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, lora_config,
-                         vision_language_config, speculative_config)
+                         load_config, vision_language_config, speculative_config)
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers

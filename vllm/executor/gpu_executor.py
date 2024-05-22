@@ -16,8 +16,11 @@ class GPUExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model.
         """
-        assert self.parallel_config.world_size == 1, (
-            "GPUExecutor only supports single GPU.")
+        import itertools
+        print(f"class_name = {type(self).__name__}")
+        if not type(self).__name__ == "TorchrunGPUExecutor":
+            assert self.parallel_config.world_size == 1, (
+                "GPUExecutor only supports single GPU.")
 
         self.driver_worker = self._create_worker()
         self.driver_worker.init_device()
