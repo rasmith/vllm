@@ -156,7 +156,6 @@ RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" 
     cp /app/vllm/rocm_patch/libamdhip64.so.6 /opt/rocm-6.1.0/lib/libamdhip64.so.6; fi
 
 RUN python3 -m pip install --upgrade pip numba
-RUN python3 -m pip install xformers==0.0.23 --no-deps
 
 # Install vLLM
 ARG VLLM_BUILD_MODE="install"
@@ -165,11 +164,8 @@ ARG VLLM_BUILD_MODE="install"
 RUN cd /app \
     && cd vllm \
     && pip install -U -r requirements-rocm.txt \
-    && if [ "$BUILD_FA" = "1" ]; then \
-    bash patch_xformers.rocm.sh; fi \
-    && if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.0_ubuntu20.04_py3.9_pytorch_2.1.1" ]; then \
-    patch /opt/rocm/include/hip/amd_detail/amd_hip_bf16.h /app/vllm/rocm_patch/rocm_bf16.patch; fi \
-    && python3 setup.py clean --all && python3 setup.py $VLLM_BUILD_MODE \
+    && VLLM_TARGET_DEVICE=rocm ROCM_HOME=/opt/rocm python3 setup.py clean --all \
+    && VLLM_TARGET_DEVICE=rocm ROCM_HOME=/opt/rocm python3 setup.py $VLLM_BUILD_MODE \
     && cd ..
 
 
@@ -177,7 +173,6 @@ RUN cd /app \
 RUN cd /app/vllm/gradlib \
     && pip install . \
     && cd ../..
-
 
 # Update Ray to latest version + set environment variable to ensure it works on TP > 1
 RUN python3 -m pip install --no-cache-dir 'ray[all]>=2.10.0'
