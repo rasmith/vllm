@@ -57,6 +57,7 @@ class TorchrunGPUExecutor(GPUExecutor):
             self.scheduler_config,
             self.device_config,
             self.cache_config,
+            self.load_config,
             local_rank=self.local_rank,
             rank=self.local_rank,
             distributed_init_method=distributed_init_method,
