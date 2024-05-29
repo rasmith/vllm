@@ -112,6 +112,7 @@ class Worker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
+        print(f"init_device:local_rank={self.local_rank}")
         init_worker_distributed_environment(self.parallel_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
@@ -315,15 +316,16 @@ def init_worker_distributed_environment(
     local_rank: int = -1,
 ) -> None:
     """Initialize the distributed environment."""
+    print("init_worker_distributed_environment")
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
+    print(f"RANSMITH:init_worker_distributed_environment:local_rank={local_rank}")
     if not parallel_config.worker_use_torchrun:
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank)
     else:
         init_distributed_environment(parallel_config.world_size, -1, "env://",
                                      local_rank)
-
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 

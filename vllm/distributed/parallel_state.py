@@ -78,11 +78,19 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
 ):
+    import os
+    local_rank = os.environ['LOCAL_RANK']
+    print("-----------------------")
+    print(f"init_distributed_environment:rank = {rank}, distributed_init_method = {distributed_init_method}")
+    print(f"init_distributed_environment:os.environ['LOCAL_RANK'] = {os.environ['LOCAL_RANK']}")
     logger.debug(
         "world_size=%d rank=%d local_rank=%d "
         "distributed_init_method=%s backend=%s", world_size, rank, local_rank,
         distributed_init_method, backend)
+    print(f"----LOCAL_RANK={os.environ.get('LOCAL_RANK', '0')}")
+    print("-----------------------")
     if not torch.distributed.is_initialized():
+        print(f"AAAAAAY:TORCH DISTRIBUTED IS NOT INITIALIZED")
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")
@@ -100,15 +108,21 @@ def init_distributed_environment(
         # set the local rank
         # local_rank is not available in torch ProcessGroup,
         # see https://github.com/pytorch/pytorch/issues/122816
+        print(f"RANSMITH:local_rank={local_rank}")
         if local_rank == -1:
             # local rank not set, this usually happens in single-node
             # setting, where we can use rank as local rank
             if distributed_init_method == "env://":
-                local_rank = envs.LOCAL_RANK
+                import os
+                print(f"envs.LOCAL_RANK = {envs.LOCAL_RANK}")
+                print(f"os.environ['LOCAL_RANK'] = {os.environ['LOCAL_RANK']}")
+                local_rank = int(os.environ['LOCAL_RANK'])
+                #envs.LOCAL_RANK
             else:
                 local_rank = rank
         global _LOCAL_RANK
         _LOCAL_RANK = local_rank
+        print(f"init_distributed_environment:local_rank={local_rank} _LOCAL_RANK = {_LOCAL_RANK}")
         # A small all_reduce for warmup.
         data = torch.zeros(1)
         if torch.cuda.is_available():
@@ -164,6 +178,7 @@ def initialize_model_parallel(
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
     rank = torch.distributed.get_rank()
+    print(f"initialize_model_parallel:rank = {rank}")
 
     # Build the tensor model-parallel groups.
     global _TP_DEVICE_GROUP, _TP_CPU_GROUP
@@ -221,6 +236,7 @@ def ensure_model_parallel_initialized(
     """
     # get the backend of _DEVICE_WORLD_GROUP
     backend = backend or torch.distributed.get_backend()
+    print(f"model_parallel_is_initialized  = {model_parallel_is_initialized()}")
     if not model_parallel_is_initialized():
         initialize_model_parallel(tensor_model_parallel_size,
                                   pipeline_model_parallel_size, backend)

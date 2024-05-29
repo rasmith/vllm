@@ -158,7 +158,7 @@ RUN if [ "$BASE_IMAGE" = "rocm/pytorch:rocm6.1_ubuntu20.04_py3.9_pytorch_2.1.2" 
 RUN python3 -m pip install --upgrade pip numba
 
 # Install vLLM
-ARG VLLM_BUILD_MODE="install"
+ARG VLLM_BUILD_MODE="develop"
 # developer might choose to use "develop" mode. But for end-users, we should do an install mode.
 # the current "develop" mode has issues with ImportError: cannot import name '_custom_C' from 'vllm' (/app/vllm/vllm/__init__.py)
 RUN cd /app \

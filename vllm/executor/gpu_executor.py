@@ -22,7 +22,14 @@ class GPUExecutor(ExecutorBase):
             assert self.parallel_config.world_size == 1, (
                 "GPUExecutor only supports single GPU.")
 
-        self.driver_worker = self._create_worker()
+        import os
+        local_rank = int(os.getenv("LOCAL_RANK","0"))
+        if not type(self).__name__ == "TorchrunGPUExecutor":
+            assert self.parallel_config.world_size == 1, (
+                "GPUExecutor only supports single GPU.")
+            self.driver_worker = self._create_worker()
+        else:
+            self.driver_worker = self._init_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
@@ -67,6 +74,7 @@ class GPUExecutor(ExecutorBase):
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
         )
+        print(f"RANSMITH:_create_worker:local_rank={local_rank}")
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
         return wrapper.worker

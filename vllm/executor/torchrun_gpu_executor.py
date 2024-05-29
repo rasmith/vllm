@@ -35,6 +35,7 @@ class TorchrunGPUExecutor(GPUExecutor):
                  vision_language_config: Optional[VisionLanguageConfig],
                  speculative_config: Optional[SpeculativeConfig]) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
+        print(f"TorchrunGPUExecutor:__init__:RANSMITH:self.local_rank={self.local_rank}")
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config, cache_config, parallel_config,
                          scheduler_config, device_config, lora_config,
@@ -65,6 +66,7 @@ class TorchrunGPUExecutor(GPUExecutor):
         )
         self.driver_worker.init_device()
         self.driver_worker.load_model()
+        return self.driver_worker
 
     def determine_num_available_blocks(self) -> tuple[int, int]:
         num_gpu_blocks, num_cpu_blocks = (
