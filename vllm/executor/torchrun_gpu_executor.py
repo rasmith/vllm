@@ -11,7 +11,7 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.distributed.communication_op import (
     broadcast_object_list, tensor_model_parallel_all_gather)
-from vllm.sequence import SamplerOutput, SequenceGroupMetadata
+from vllm.sequence import ExecuteModelRequest, SamplerOutput, SequenceGroupMetadata
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         make_async)
 
@@ -88,17 +88,21 @@ class TorchrunGPUExecutor(GPUExecutor):
         output = tensor_model_parallel_all_gather(t)
         return (torch.min(output[0]).item(), torch.min(output[1]).item())
 
-    def execute_model(self,
-                      seq_group_metadata_list: List[SequenceGroupMetadata],
-                      blocks_to_swap_in: Dict[int, int],
-                      blocks_to_swap_out: Dict[int, int],
-                      blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
-        output = self.driver_worker.execute_model(
-            seq_group_metadata_list=seq_group_metadata_list,
-            blocks_to_swap_in=blocks_to_swap_in,
-            blocks_to_swap_out=blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
-        )
+    def execute_model(
+            self,
+            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+    # def execute_model(self,
+                      # seq_group_metadata_list: List[SequenceGroupMetadata],
+                      # blocks_to_swap_in: Dict[int, int],
+                      # blocks_to_swap_out: Dict[int, int],
+                      # blocks_to_copy: Dict[int, List[int]]) -> SamplerOutput:
+        output = self.driver_worker(execute_model_req)
+        # output = self.driver_worker.execute_model(
+            # seq_group_metadata_list=seq_group_metadata_list,
+            # blocks_to_swap_in=blocks_to_swap_in,
+            # blocks_to_swap_out=blocks_to_swap_out,
+            # blocks_to_copy=blocks_to_copy,
+        # )
         if self.is_driver_worker:
             broadcast_object_list([output], src=0)
         else:
