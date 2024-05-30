@@ -90,7 +90,7 @@ def init_distributed_environment(
     print(f"----LOCAL_RANK={os.environ.get('LOCAL_RANK', '0')}")
     print("-----------------------")
     if not torch.distributed.is_initialized():
-        print(f"AAAAAAY:TORCH DISTRIBUTED IS NOT INITIALIZED")
+        print(f"AAAAAAY:TORCH DISTRIBUTED IS NOT INITIALIZED!1111")
         assert distributed_init_method is not None, (
             "distributed_init_method must be provided when initializing "
             "distributed environment")

@@ -36,10 +36,17 @@ class TorchrunGPUExecutor(GPUExecutor):
                  speculative_config: Optional[SpeculativeConfig]) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
         print(f"TorchrunGPUExecutor:__init__:RANSMITH:self.local_rank={self.local_rank}")
+        print(f"RANSMITH:TorchrunGPUExecutor:load_config = {load_config}")
         self.is_driver_worker = self.local_rank == 0
-        super().__init__(model_config, cache_config, parallel_config,
-                         scheduler_config, device_config, lora_config,
-                         load_config, vision_language_config, speculative_config)
+        super().__init__(model_config = model_config, 
+                         cache_config = cache_config,
+                         parallel_config = parallel_config,
+                         scheduler_config = scheduler_config, 
+                         device_config = device_config,
+                         load_config = load_config,
+                         lora_config = lora_config,
+                         vision_language_config = vision_language_config,
+                         speculative_config = speculative_config)
 
     def _init_worker(self):
         # Lazy import the Worker to avoid importing torch.cuda/xformers
@@ -51,6 +58,7 @@ class TorchrunGPUExecutor(GPUExecutor):
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
+        print(f"RANSMITH:load_config = {self.load_config}")
         self.driver_worker = Worker(
             self.model_config,
             self.parallel_config,

@@ -37,6 +37,9 @@ class ExecutorBase(ABC):
         self.device_config = device_config
         self.vision_language_config = vision_language_config
         self.speculative_config = speculative_config
+        import traceback
+        print(f"RANSMITH:ExecutorBase:load_config = {load_config} self.load_config = {self.load_config}")
+        traceback.print_stack()
 
         self._init_executor()
 

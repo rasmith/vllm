@@ -160,6 +160,7 @@ class LLMEngine:
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
 
+        print(f"RANSMITH:LLMEngine:self.load_config = {self.load_config}")
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -169,7 +170,7 @@ class LLMEngine:
             lora_config=lora_config,
             vision_language_config=vision_language_config,
             speculative_config=speculative_config,
-            load_config=load_config,
+            load_config=self.load_config,
         )
 
         if not self.model_config.embedding_mode:
