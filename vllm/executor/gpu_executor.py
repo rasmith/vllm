@@ -21,8 +21,6 @@ class GPUExecutor(ExecutorBase):
             assert self.parallel_config.world_size == 1, (
                 "GPUExecutor only supports single GPU.")
 
-        import os
-        local_rank = int(os.getenv("LOCAL_RANK","0"))
         if not type(self).__name__ == "TorchrunGPUExecutor":
             assert self.parallel_config.world_size == 1, (
                 "GPUExecutor only supports single GPU.")
