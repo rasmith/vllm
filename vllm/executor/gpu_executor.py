@@ -17,7 +17,6 @@ class GPUExecutor(ExecutorBase):
         """Initialize the worker and load the model.
         """
         import itertools
-        print(f"class_name = {type(self).__name__}")
         if not type(self).__name__ == "TorchrunGPUExecutor":
             assert self.parallel_config.world_size == 1, (
                 "GPUExecutor only supports single GPU.")
@@ -74,7 +73,6 @@ class GPUExecutor(ExecutorBase):
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
         )
-        print(f"RANSMITH:_create_worker:local_rank={local_rank}")
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
         return wrapper.worker

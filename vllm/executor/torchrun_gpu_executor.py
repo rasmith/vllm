@@ -35,8 +35,6 @@ class TorchrunGPUExecutor(GPUExecutor):
                  vision_language_config: Optional[VisionLanguageConfig],
                  speculative_config: Optional[SpeculativeConfig]) -> None:
         self.local_rank = int(os.getenv("LOCAL_RANK", "0"))
-        print(f"TorchrunGPUExecutor:__init__:RANSMITH:self.local_rank={self.local_rank}")
-        print(f"RANSMITH:TorchrunGPUExecutor:load_config = {load_config}")
         self.is_driver_worker = self.local_rank == 0
         super().__init__(model_config = model_config, 
                          cache_config = cache_config,
@@ -58,7 +56,6 @@ class TorchrunGPUExecutor(GPUExecutor):
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        print(f"RANSMITH:load_config = {self.load_config}")
         self.driver_worker = Worker(
             self.model_config,
             self.parallel_config,
