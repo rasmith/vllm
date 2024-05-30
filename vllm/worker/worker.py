@@ -162,6 +162,7 @@ class Worker(WorkerBase):
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_gpu_memory - free_gpu_memory
+        print(f"RANSMITH:peak_memory = {peak_memory}, self.init_gpu_memory = {self.init_gpu_memory}, free_gpu_memory = {free_gpu_memory}")
         assert peak_memory > 0, (
             "Error in memory profiling. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
