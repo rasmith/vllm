@@ -226,6 +226,7 @@ set(CUSTOM_SRC
 "csrc/custom/custom_kernels.cu"
 "csrc/custom/fused_kernels.cu"
 "csrc/custom/custom.cu"
+"csrc/custom/paged_attention/attention_ll4mi.cu"
 )
 
 define_gpu_extension_target(
@@ -328,12 +329,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling C extension.")
   add_dependencies(default _C)
   add_dependencies(default _custom_C)
+  message(STATUS "Enabling moe extension.")
+  add_dependencies(default _moe_C)  
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  message(STATUS "Enabling moe extension.")
-  add_dependencies(default _moe_C)
-
   # Enable punica if -DVLLM_INSTALL_PUNICA_KERNELS=ON or
   # VLLM_INSTALL_PUNICA_KERNELS is set in the environment and
   # there are supported target arches.
