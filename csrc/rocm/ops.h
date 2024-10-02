@@ -12,3 +12,8 @@ void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      const c10::optional<torch::Tensor>& alibi_slopes,
                      const std::string& kv_cache_dtype, double k_scale,
                      double v_scale);
+
+torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
+                            torch::Tensor qweight_tensor,
+                            torch::Tensor scales_tensor,
+                            torch::Tensor qzeros_tensor, int64_t splitK);

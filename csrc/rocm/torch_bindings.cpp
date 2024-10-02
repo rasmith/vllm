@@ -29,6 +29,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str kv_cache_dtype,"
       "                float k_scale, float v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  rocm_ops.def("awq_gemm_test(Tensor input_tensor, Tensor qweight_tensor,"
+          "Tensor scales_tensor, Tensor qzeros_tensor, int splitK) -> Tensor");
+  rocm_ops.impl("awq_gemm_test", torch::kCUDA, &awq_gemm_test);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

@@ -125,14 +125,16 @@ def test_gemm(N, K, M, splitK, group_size):
 
     input_rows = N
     input_cols = K
-    input_dtype = torch.float32
+    input_dtype = torch.float16
     qweight_rows = input_cols
     qweight_cols = M // 8
+    qweight_dtype = torch.int32
     scales_rows = qweight_rows // group_size
     scales_cols = M
-    scales_dtype = torch.float32
+    scales_dtype = torch.float16
     qzeros_rows = scales_rows
     qzeros_cols = qweight_cols
+    qzeros_dtype = torch.int32
 
     seed_everything(0)
 
@@ -142,17 +144,20 @@ def test_gemm(N, K, M, splitK, group_size):
     qweight = torch.randint(0,
                             torch.iinfo(torch.int32).max,
                             (qweight_rows, qweight_cols),
+                            dtype=qweight_dtype,
                             device=device)
     qzeros = torch.randint(0,
                            torch.iinfo(torch.int32).max,
                            (qzeros_rows, qzeros_cols),
+                           dtype=qzeros_dtype,
                            device=device)
     scales = torch.rand((scales_rows, scales_cols),
                         dtype=scales_dtype,
                         device=device)
 
-    output_triton = awq_gemm_triton(input, qweight, scales, qzeros,
-                                    split_k_iters)
+    output_triton = torch.ops._rocm_C.awq_gemm_test(input, qweight, scales, qzeros, split_k_iters)
+    # output_triton = awq_gemm_triton(input, qweight, scales, qzeros,
+                                    # split_k_iters)
 
     assert (not torch.any(torch.isinf(output_triton))
             and not torch.any(torch.isnan(output_triton)))
