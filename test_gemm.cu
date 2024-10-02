@@ -16,6 +16,8 @@
     }                                                                          \
   }
 
+#define CDIV(A, B) (((A) + (B)-1) / (B))
+
 __device__ void AtomicAdd(half* address, half val) {
   uint32_t* address_as_ui =
       (uint32_t*)((size_t)address - ((size_t)address & 2));
@@ -135,25 +137,67 @@ void PrintValue(half v) {
 }
 
 template <typename NumberType>
-void PrintMatrix(const std::string& label, int rows, int cols,
-                 const std::vector<NumberType>& m) {
-  std::cout << label << "=";
+void PrintRow(int row, int row_padding, int rows, int cols,
+              const std::vector<NumberType>& m, int left = 5, int right = 5) {
+  if (row > 0) {
+    std::string padding(row_padding, ' ');
+    std::cout << padding;
+  }
   std::cout << "[";
-  for (int y = 0; y < rows; ++y) {
-    if (y > 0) {
-      std::string padding(label.size() + 2, ' ');
-      std::cout << padding;
+  bool has_valid_bounds = left > 0 && left < cols && right > 0 && right < cols;
+  if (!has_valid_bounds) {
+    left = cols;
+    right = -1;
+  }
+  for (int x = 0; x < std::min(left, cols); ++x) {
+    PrintValue(m[cols * row + x]);
+    if (x == cols - 1 && row < rows - 1) {
+      std::cout << "]\n";
+    } else if (x == cols - 1 && row == rows - 1) {
+      std::cout << "]]\n";
+    } else {
+      std::cout << " ";
     }
-    std::cout << "[";
-    for (int x = 0; x < cols; ++x) {
-      PrintValue(m[cols * y + x]);
-      if (x == cols - 1 && y < rows - 1) {
+  }
+  if (left > 0 && left < cols && right > 0 && right < cols) {
+    std::cout << " ... ";
+    for (int x = cols - right; x < cols; ++x) {
+      PrintValue(m[cols * row + x]);
+      if (x == cols - 1 && row < rows - 1) {
         std::cout << "]\n";
-      } else if (x == cols - 1 && y == rows - 1) {
+      } else if (x == cols - 1 && row == rows - 1) {
         std::cout << "]]\n";
       } else {
         std::cout << " ";
       }
+    }
+  }
+}
+
+template <typename NumberType>
+void PrintMatrix(const std::string& label, int rows, int cols,
+                 const std::vector<NumberType>& m, int top_rows = 2,
+                 int bottom_rows = 2) {
+  std::cout << label << "=";
+  std::cout << "[";
+  int padding = label.size() + 2;
+  if ((top_rows < 0 || top_rows > rows) ||
+      (bottom_rows < 0 || bottom_rows > rows)) {
+    top_rows = rows;
+  }
+
+  for (int y = 0; y < top_rows; ++y) {
+    PrintRow(y, padding, rows, cols, m);
+  }
+
+  if (top_rows > 0 && top_rows < rows && bottom_rows > 0 &&
+      bottom_rows < rows) {
+    std::string padding_str(padding, ' ');
+    std::cout << padding_str << ".\n";
+    std::cout << padding_str << ".\n";
+    std::cout << padding_str << ".\n\n";
+    for (int y = 0; y < bottom_rows; ++y) {
+      PrintRow(rows - bottom_rows - y - 1, padding, rows, cols, m);
     }
   }
 }
@@ -198,82 +242,135 @@ void awq_gemm_cpu(half* a, int* q, int* zeros, half* scales, int M, int K,
   }
 }
 
-// threadDim.x - c-tiles
-// threadDim.y - split-k blocks
-template <int TILE_SIZE_M, int TILE_SIZE_K, int TILE_SIZE_N>
+template <int TILE_WIDTH>
 __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
                                 int size_m, int size_k, int size_n,
                                 int group_size, int split_k, half* c) {
-  int tid_c = threadIdx.x + blockIdx.x * blockDim.x;
-  int tid_k = threadIdx.y + blockIdx.y * blockDim.y;
-  __constant__ static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+  static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+  half output = __ushort_as_half(0);
+  int row = blockIdx.y * TILE_WIDTH + threadIdx.y;
+  int col = blockIdx.x * TILE_WIDTH + threadIdx.x;
 
-  // (ii, jj) is the tile index in C
-  int tile_width = size_n / TILE_SIZE_N;  // Number of tiles per row.
-  int ii = tid_c / tile_width;
-  int jj = tid_c % tile_width;
-  int num_k_tiles_per_thread = cdiv(size_k, split_k * TILE_SIZE_K);
-  int start_tile = tid_k * num_k_tiles_per_thread;
-  int end_tile = start_tile + num_k_tiles_per_thread;
-
-  for (int kk = start_tile; kk < end_tile; ++kk) {
-    for (int i = 0; i < TILE_SIZE_M; ++i) {
-      int i_a = ii * TILE_SIZE_M + i;
-      int i_c = i_a;
-      for (int j = 0; j < TILE_SIZE_N; ++j) {
-        int j_b = jj * TILE_SIZE_N + j;
-        int j_c = j_b;
-        half c_ij = __int2half_rn(0);
-        for (int k = 0; k < TILE_SIZE_K; ++k) {
-          int k_a = kk * TILE_SIZE_K + k;
-          int k_b = k_a;
-          if (i_a >= 0 && i_a < size_m && k_b >= 0 && k_b < size_k &&
-              j_b >= 0 && j_b < size_n) {
-            half a_ik = a[i_a * size_k + k_a];
-            int q_value = q[k_b * (size_n / 8) + (j_b / 8)];
-            int z_value = zeros[(k_b / group_size) * (size_n / 8) + (j_b / 8)];
-            half scale = scales[(k_b / group_size) * size_n + j_b];
-            int shift = kReverseAwqLookup[j_b % 8] * 4;
-            int b_int4 = (q_value >> shift) & 0xF;
-            int z_int4 = (z_value >> shift) & 0xF;
-            half b_kj = __int2half_rn(b_int4 - z_int4) * scale;
-            c_ij += a_ik * b_kj;
-          }
-        }
-        // Implements atomic version of: c[i_c * size_n + j_c] += a_ik * b_kj
-        //*(c + i_c * size_n + j_c) = 0;
-        // int output_index = i_c * size_n + j_c;
-        // if (!(output_index >= 0 && output_index < size_m * size_n)) {
-        // printf(
-        //"tid_c = %d, tid_k = %d, ii = %d, jj = %d, i_c = %d, j_c = %d, "
-        //"output_index = %d\n",
-        // tid_c, tid_k, ii, jj, i_c, j_c, output_index);
-        //}
-
-        // assert(output_index >= 0 && output_index < size_m * size_n);
-        //  if (i_c == 0 && j_c == 0) {
-        //  printf("write: tid_c = %d, tid_k = %d, c_ij = %f\n",
-        //  tid_c, tid_k, __half2float(c_ij));
-        // }
-        // if (i_c >= 0 && i_c < size_m && j_c >= 0 && j_c < size_n) {
-        // AtomicAdd(&c[output_index], c_ij);
-        //}
-        int output_index = tid_k * size_n * size_m + i_c * size_n + j_c;
-        // AtomicAdd(&c[output_index], c_ij);
-        if (i_c >= 0 && i_c < size_m && j_c >= 0 && j_c < size_n) {
-          c[output_index] = c_ij;
-        }
-      }
-    }
+  if (row > size_m || row > size_n) {
+    return;
   }
+
+  __shared__ float a_tile[TILE_WIDTH][TILE_WIDTH];
+  __shared__ float b_tile[TILE_WIDTH][TILE_WIDTH];
+
+  int tile_start = 0;
+  int tile_end = CDIV(size_k, TILE_WIDTH);
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
+  for (int tile = tile_start; tile < tile_end; ++tile) {
+    int ax = tile * TILE_WIDTH + tx;
+    int ay = row;
+    if (ay < size_m && ax < size_k) {
+      a_tile[ty][tx] = a[ay * size_n + ax];
+    } else {
+      a_tile[ty][tx] = __ushort_as_half(0);
+    }
+
+    int bx = col;
+    int by = tile * TILE_WIDTH + ty;
+    if (by < size_k && bx < size_n) {
+      int q_value = q[by * (size_n / 8) + (bx / 8)];
+      int z_value = zeros[(by / group_size) * (size_n / 8) + (bx / 8)];
+      half scale = scales[(by / group_size) * size_n + bx];
+      int shift = kReverseAwqLookup[bx % 8] * 4;
+      int b_int4 = (q_value >> shift) & 0xF;
+      int z_int4 = (z_value >> shift) & 0xF;
+      b_tile[ty][tx] = __int2half_rn(b_int4 - z_int4) * scale;
+    } else {
+      b_tile[ty][tx] = __ushort_as_half(0);
+    }
+    __syncthreads();
+
+    for (int k = 0; k < TILE_WIDTH; ++k) {
+      output += a_tile[ty][k] * b_tile[k][tx];
+    }
+    __syncthreads();
+  }
+
+  c[row * size_m + col] = output;
 }
+
+// threadDim.x - c-tiles
+// threadDim.y - split-k blocks
+// template <int TILE_SIZE_M, int TILE_SIZE_K, int TILE_SIZE_N>
+//__global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
+// int size_m, int size_k, int size_n,
+// int group_size, int split_k, half* c) {
+// int tid_c = threadIdx.x + blockIdx.x * blockDim.x;
+// int tid_k = threadIdx.y + blockIdx.y * blockDim.y;
+//__constant__ static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+
+//// (ii, jj) is the tile index in C
+// int tile_width = size_n / TILE_SIZE_N;  // Number of tiles per row.
+// int ii = tid_c / tile_width;
+// int jj = tid_c % tile_width;
+// int num_k_tiles_per_thread = cdiv(size_k, split_k * TILE_SIZE_K);
+// int start_tile = tid_k * num_k_tiles_per_thread;
+// int end_tile = start_tile + num_k_tiles_per_thread;
+
+// for (int kk = start_tile; kk < end_tile; ++kk) {
+// for (int i = 0; i < TILE_SIZE_M; ++i) {
+// int i_a = ii * TILE_SIZE_M + i;
+// int i_c = i_a;
+// for (int j = 0; j < TILE_SIZE_N; ++j) {
+// int j_b = jj * TILE_SIZE_N + j;
+// int j_c = j_b;
+// half c_ij = __int2half_rn(0);
+// for (int k = 0; k < TILE_SIZE_K; ++k) {
+// int k_a = kk * TILE_SIZE_K + k;
+// int k_b = k_a;
+// if (i_a >= 0 && i_a < size_m && k_b >= 0 && k_b < size_k &&
+// j_b >= 0 && j_b < size_n) {
+// half a_ik = a[i_a * size_k + k_a];
+// int q_value = q[k_b * (size_n / 8) + (j_b / 8)];
+// int z_value = zeros[(k_b / group_size) * (size_n / 8) + (j_b / 8)];
+// half scale = scales[(k_b / group_size) * size_n + j_b];
+// int shift = kReverseAwqLookup[j_b % 8] * 4;
+// int b_int4 = (q_value >> shift) & 0xF;
+// int z_int4 = (z_value >> shift) & 0xF;
+// half b_kj = __int2half_rn(b_int4 - z_int4) * scale;
+// c_ij += a_ik * b_kj;
+//}
+//}
+//// Implements atomic version of: c[i_c * size_n + j_c] += a_ik * b_kj
+///[>(c + i_c * size_n + j_c) = 0;
+//// int output_index = i_c * size_n + j_c;
+//// if (!(output_index >= 0 && output_index < size_m * size_n)) {
+//// printf(
+////"tid_c = %d, tid_k = %d, ii = %d, jj = %d, i_c = %d, j_c = %d, "
+////"output_index = %d\n",
+//// tid_c, tid_k, ii, jj, i_c, j_c, output_index);
+////}
+
+//// assert(output_index >= 0 && output_index < size_m * size_n);
+////  if (i_c == 0 && j_c == 0) {
+////  printf("write: tid_c = %d, tid_k = %d, c_ij = %f\n",
+////  tid_c, tid_k, __half2float(c_ij));
+//// }
+//// if (i_c >= 0 && i_c < size_m && j_c >= 0 && j_c < size_n) {
+//// AtomicAdd(&c[output_index], c_ij);
+////}
+// int output_index = tid_k * size_n * size_m + i_c * size_n + j_c;
+//// AtomicAdd(&c[output_index], c_ij);
+// if (i_c >= 0 && i_c < size_m && j_c >= 0 && j_c < size_n) {
+// c[output_index] = c_ij;
+//}
+//}
+//}
+//}
+//}
 
 int main(int argc, char** argv) {
   constexpr uint32_t kMatrixSizeM = 24;
   constexpr uint32_t kMatrixSizeN = 128;
   constexpr uint32_t kMatrixSizeK = 24;
   constexpr uint32_t kGroupSize = 8;
-  constexpr uint32_t kSplitK = 8;
+  constexpr uint32_t kSplitK = 1;
   std::vector<half> a;
   std::vector<int> q;
   std::vector<half> c;
@@ -312,19 +409,31 @@ int main(int argc, char** argv) {
   hip_array_zeros.CopyToDevice(zeros);
   hip_array_scales.CopyToDevice(scales);
 
+  constexpr uint32_t kTileWidth = 32;
   constexpr uint32_t kTileSizeM = 32;
   constexpr uint32_t kTileSizeN = 32;
   constexpr uint32_t kTileSizeK = 32;
   constexpr uint32_t kTileSize = kTileSizeM * kTileSizeN;
-  constexpr uint32_t kThreadsPerBlockX = 8;
-  constexpr uint32_t kThreadsPerBlockY = kSplitK;
+  // constexpr uint32_t kThreadsPerBlockX = 8;
+  // constexpr uint32_t kThreadsPerBlockY = kSplitK;
+  constexpr uint32_t kThreadsPerBlockX = kTileSizeN;
+  constexpr uint32_t kThreadsPerBlockY = kTileSizeM;
   constexpr uint32_t kNumTiles =
       cdiv_const(kMatrixSizeN * kMatrixSizeM, kTileSizeN * kTileSizeM);
-  constexpr uint32_t kNumBlocksX = cdiv_const(kNumTiles, kThreadsPerBlockX);
-  constexpr uint32_t kNumBlocksY = 1;
+  // constexpr uint32_t kNumBlocksX = cdiv_const(kNumTiles, kThreadsPerBlockX);
+  // constexpr uint32_t kNumBlocksY = 1;
+  // constexpr uint32_t kNumBlocksX = cdiv_const(kMatrixSizeN, kTileSizeN);
+  // constexpr uint32_t kNumBlocksY = cdiv_const(kMatrixSizeM, kTileSizeM);
+
+  constexpr uint32_t kNumBlocksX = CDIV(kMatrixSizeN, kTileWidth);
+  constexpr uint32_t kNumBlocksY = CDIV(kMatrixSizeM, kTileWidth);
 
   // x dimension processes tiles
   // y dimension does split-k
+
+  // Attempt #2:
+  // x dimension - cols
+  // y dimension - rows
   dim3 threads_per_block(kThreadsPerBlockX, kThreadsPerBlockY);
   dim3 blocks(kNumBlocksX, kNumBlocksY);
 
@@ -338,11 +447,16 @@ int main(int argc, char** argv) {
             << kThreadsPerBlockY << ")\n";
   std::cout << "blocks = (" << kNumBlocksX << "," << kNumBlocksY << ")\n";
 
-  awq_gemm_kernel<kTileSizeM, kTileSizeK, kTileSizeN>
-      <<<blocks, threads_per_block>>>(
-          hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
-          hip_array_scales.data(), kMatrixSizeM, kMatrixSizeK, kMatrixSizeN,
-          kGroupSize, kSplitK, hip_array_c.data());
+  awq_gemm_kernel<kTileWidth><<<blocks, threads_per_block>>>(
+      hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
+      hip_array_scales.data(), kMatrixSizeM, kMatrixSizeK, kMatrixSizeN,
+      kGroupSize, kSplitK, hip_array_c.data());
+
+  // awq_gemm_kernel<kTileSizeM, kTileSizeK, kTileSizeN>
+  //<<<blocks, threads_per_block>>>(
+  // hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
+  // hip_array_scales.data(), kMatrixSizeM, kMatrixSizeK, kMatrixSizeN,
+  // kGroupSize, kSplitK, hip_array_c.data());
 
   CHECK_HIP(hipDeviceSynchronize());
 
