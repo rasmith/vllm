@@ -213,6 +213,11 @@ half dequantize_cpu(int i, int j, int* q, int K, int N, int G, int* zeros,
   packed_values = zeros[(i / G) * (N / 8) + (j / 8)];
   int z_value = (packed_values >> shift) & 0xF;
   float float_value = (q_value - z_value) * __half2float(scale);
+  if (i == 0 && j == 16) {
+    std::cout << "scale = " << __half2float(scale) << " q_value = "
+              << q_value << " z_value = " << z_value << " --> " <<
+              float_value << "\n";
+  }
   return __float2half_rn(float_value);
 }
 
@@ -233,7 +238,7 @@ void awq_gemm_cpu(half* a, int* q, int* zeros, half* scales, int M, int K,
         float a_ik32 = __half2float(a_ik);
         float b_kj32 = __half2float(b_kj);
         sum += a_ik32 * b_kj32;
-        if (i == 0 && j == 0) {
+        if (i == 0 && j == N - 1) {
           printf("cpu:k = %d, a_ik = %f, b_kj = %f\n", k, a_ik32, b_kj32);
         }
       }
@@ -251,10 +256,6 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   int row = blockIdx.y * TILE_WIDTH + threadIdx.y;
   int col = blockIdx.x * TILE_WIDTH + threadIdx.x;
 
-  if (row > size_m || row > size_n) {
-    return;
-  }
-
   __shared__ float a_tile[TILE_WIDTH][TILE_WIDTH];
   __shared__ float b_tile[TILE_WIDTH][TILE_WIDTH];
 
@@ -266,7 +267,7 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
     int ax = tile * TILE_WIDTH + tx;
     int ay = row;
     if (ay < size_m && ax < size_k) {
-      a_tile[ty][tx] = a[ay * size_n + ax];
+      a_tile[ty][tx] = a[ay * size_k + ax];
     } else {
       a_tile[ty][tx] = __ushort_as_half(0);
     }
@@ -292,7 +293,9 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
     __syncthreads();
   }
 
-  c[row * size_m + col] = output;
+  if (row < size_m && col < size_n) {
+    c[row * size_n + col] = output;
+  }
 }
 
 // threadDim.x - c-tiles
@@ -367,9 +370,9 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
 
 int main(int argc, char** argv) {
   constexpr uint32_t kMatrixSizeM = 24;
-  constexpr uint32_t kMatrixSizeN = 128;
-  constexpr uint32_t kMatrixSizeK = 24;
-  constexpr uint32_t kGroupSize = 8;
+  constexpr uint32_t kMatrixSizeN = 17;
+  constexpr uint32_t kMatrixSizeK = 32;
+  constexpr uint32_t kGroupSize = 16;
   constexpr uint32_t kSplitK = 1;
   std::vector<half> a;
   std::vector<int> q;
@@ -476,6 +479,6 @@ int main(int argc, char** argv) {
 
   CHECK_HIP(hipDeviceSynchronize());
 
-  PrintMatrix("c_gpu", kMatrixSizeM, kMatrixSizeN, result);
+  PrintMatrix("c_gpu", kMatrixSizeM, kMatrixSizeN, c_gpu);
   return 0;
 }
