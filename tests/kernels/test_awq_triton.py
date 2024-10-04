@@ -162,7 +162,8 @@ def test_gemm(N, K, M, splitK, group_size):
     assert (not torch.any(torch.isinf(output_triton))
             and not torch.any(torch.isnan(output_triton)))
 
-    dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
+    dequantized_weights = awq_dequantize_torch(qweight, scales, qzeros, group_size)
+    # dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
 
     output_torch = torch.matmul(input, dequantized_weights)
 
