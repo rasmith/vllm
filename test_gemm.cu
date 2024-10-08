@@ -310,16 +310,15 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
                                      int size_n, int size_k, int size_m,
                                      int group_size, int split_k, half* c) {
   static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
-  float output = 0.0f;
-  // dim3 = (16, 4) = 64 threads per block, 1 wave
-  int row = blockIdx.x * blockDim.x + threadIdx.x;  // blockDim.x = TILE_WIDTH
-  int col = blockIdx.y * blockDim.y;
-
-  int tile_start = 0;
-  int tile_end = CDIV(size_k, TILE_WIDTH);
   int tx = threadIdx.x;
   int ty = threadIdx.y;
 
+  // dim3 = (16, 4) = 64 threads per block, 1 wave
+  int row = blockIdx.x * blockDim.x + tx;  // blockDim.x = TILE_WIDTH
+  int col = blockIdx.y * TILE_WIDTH + tx;
+
+  int tile_start = 0;
+  int tile_end = CDIV(size_k, TILE_WIDTH);
   float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
   float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
   float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
