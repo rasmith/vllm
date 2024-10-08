@@ -36,6 +36,7 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
 
   int tx = threadIdx.x;
   int ty = threadIdx.y;
+  int k = threadIdx.z; // Get k for splitK
 
   // dim3 = (16, 4) = 64 threads per block, 1 wave
 
@@ -48,14 +49,28 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
   // The column currently being worked on.
   int col = blockIdx.y * TILE_WIDTH + tx;
 
-  int tile_start = 0;
-  int tile_end = CDIV(size_k, TILE_WIDTH);
+  int num_tiles = CDIV(size_k, TILE_WIDTH);
+
+  //int tile_start = 0;
+  //int tile_end = CDIV(size_k, TILE_WIDTH);
 
   float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
   float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
   float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
 
-  for (int tile = tile_start; tile < tile_end; ++tile) {
+  //for (int tile = tile_start; tile < tile_end; ++tile) {
+  // Have CDIV(size_k, split_k * TILE_WIDTH) groups of tiles:
+  //
+  //  --------------------------------------------
+  //       group_0      |       group_1     | ...
+  //  --------------------------------------------
+  //  0 ... split_k - 1 | 0 ... split_k - 1 | ...
+  //  --------------------------------------------
+  // 
+  // and this thread will work on:
+  //    threadIdx.z + i * split_k
+  // tiles.
+  for (int tile = k; tile < num_tiles; tile += split_k) {
 
     for (int i = 0; i < 4; ++i) {
       // Go down to the current row, and then over to the current k-tile
@@ -119,7 +134,7 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
     int cj = col;
     int ci = (row / TILE_WIDTH) * TILE_WIDTH + ty * 4 + i;
     if (ci >= 0 && ci < size_n && cj >= 0 && cj < size_m) {
-      c[ci * size_m + cj] = accumulator[i];
+      c[k * size_m * size_n + ci * size_m + cj] = accumulator[i];
     }
   }
 }
@@ -218,7 +233,7 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
     //  x dimension processes tiles
     //  y dimension does split-k
     // dim3 threads_per_block(kThreadsPerBlockX, threads_per_block_y);
-    dim3 threads_per_block(16, 4);
+    dim3 threads_per_block(16, 4, splitK);
     // dim3 blocks(num_blocks_x, kNumBlocksY);
     dim3 blocks(CDIV(size_n, kTileWidth),
                 CDIV(size_m, kTileWidth));  // CDIV(size_m, kTileWidth));
