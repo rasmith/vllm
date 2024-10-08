@@ -115,7 +115,6 @@ def test_dequantize(qweight_rows, qweight_cols, group_size):
 def test_gemm(N, K, M, splitK, group_size):
 
     import time
-    print(f"test_gemm")
     if group_size == -1:
         group_size = K
 
@@ -133,6 +132,7 @@ def test_gemm(N, K, M, splitK, group_size):
     qzeros_rows = scales_rows
     qzeros_cols = qweight_cols
     qzeros_dtype = torch.int32
+    print(f"test_gemm:N = {N}, K = {K}, M = {M}")
 
     torch.manual_seed(0)
 
@@ -216,9 +216,9 @@ def main():
     # N = 1
     # K = 3584
     # M = 448
-    N = 1
-    K = 128
-    M = 32
+    N = 1 * 100
+    K = 128 * 10
+    M = 32 * 32
     splitK = 8
     group_size = 16
 
