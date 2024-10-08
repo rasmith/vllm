@@ -37,16 +37,6 @@ __device__ void AtomicAdd(half* address, half val) {
 }
 
 template <typename NumberType>
-constexpr NumberType cdiv_const(NumberType a, NumberType b) {
-  return (a + b - 1) / b;
-}
-
-template <typename NumberType>
-__host__ __device__ NumberType cdiv(NumberType a, NumberType b) {
-  return (a + b - 1) / b;
-}
-
-template <typename NumberType>
 NumberType* AllocateDeviceVector(size_t size) {
   NumberType* d;
   std::cout << "hipMalloc: " << sizeof(NumberType) * size << " bytes.\n";
@@ -177,7 +167,7 @@ void PrintRow(int row, int row_padding, int rows, int cols,
 template <typename NumberType>
 void PrintMatrix(const std::string& label, int rows, int cols,
                  const std::vector<NumberType>& m, int top_rows = 2,
-                 int bottom_rows = 2) {
+                 int bottom_rows = 2, int left_rows = 5, int right_rows = 5) {
   std::cout << label << "=";
   std::cout << "[";
   int padding = label.size() + 2;
@@ -187,7 +177,7 @@ void PrintMatrix(const std::string& label, int rows, int cols,
   }
 
   for (int y = 0; y < top_rows; ++y) {
-    PrintRow(y, padding, rows, cols, m);
+    PrintRow(y, padding, rows, cols, m, left_rows, right_rows);
   }
 
   if (top_rows > 0 && top_rows < rows && bottom_rows > 0 &&
@@ -197,7 +187,27 @@ void PrintMatrix(const std::string& label, int rows, int cols,
     std::cout << padding_str << ".\n";
     std::cout << padding_str << ".\n\n";
     for (int y = 0; y < bottom_rows; ++y) {
-      PrintRow(rows - bottom_rows - y - 1, padding, rows, cols, m);
+      PrintRow(rows - bottom_rows - y - 1, padding, rows, cols, m, left_rows,
+               right_rows);
+    }
+  }
+}
+
+void DequantizeMatrix(int* q, int* zeros, half* scales, int size_k, int size_m,
+                      int group_size, std::vector<half>& b) {
+  static constexpr std::array<int, 8> reverse_awq_lut = {0, 4, 1, 5,
+                                                         2, 6, 3, 7};
+  b.resize(size_k * size_m);
+  for (int y = 0; y < size_k; ++y) {
+    for (int x = 0; x < size_m; ++x) {
+      int q_value = q[y * (size_m / 8) + (x / 8)];
+      int z_value = zeros[(y / group_size) * (size_m / 8) + (x / 8)];
+      int shift = reverse_awq_lut[x % 8] * 4;
+      int q_int4 = (q_value >> shift) & 0xF;
+      int z_int4 = (z_value >> shift) & 0xF;
+      half scale = scales[(y / group_size) * size_m + x];
+      half b_value = (q_int4 - z_int4) * __half2float(scale);
+      b[y * size_m + x] = b_value;
     }
   }
 }
@@ -288,6 +298,85 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   }
 }
 
+using float16_t = _Float16;
+using float32_t = float;
+using float16x4_t = float16_t __attribute__((ext_vector_type(4)));
+using float32x4_t = float32_t __attribute__((ext_vector_type(4)));
+
+#define WAVE_SIZE 64
+
+template <int TILE_WIDTH>
+__global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
+                                     int size_n, int size_k, int size_m,
+                                     int group_size, int split_k, half* c) {
+  static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+  float output = 0.0f;
+  // dim3 = (16, 4) = 64 threads per block, 1 wave
+  int row = blockIdx.x * blockDim.x + threadIdx.x;  // blockDim.x = TILE_WIDTH
+  int col = blockIdx.y * blockDim.y;
+
+  int tile_start = 0;
+  int tile_end = CDIV(size_k, TILE_WIDTH);
+  int tx = threadIdx.x;
+  int ty = threadIdx.y;
+
+  float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
+  float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
+  float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
+
+  for (int tile = tile_start; tile < tile_end; ++tile) {
+    for (int i = 0; i < 4; ++i) {
+      // Go down to the current row, and then over to the current k-tile
+      // and then get the 4 values starting at:
+      //    (row, tile * TILE_WIDTH + 4 * ty)
+      // and load them into registers.
+      int ax = tile * TILE_WIDTH + 4 * ty + i;
+      int ay = row;
+      a_frag[i] = a[ay * size_k + ax];
+    }
+
+    //if (blockIdx.x == 0 && blockIdx.y == 0) {
+      //printf("(%d, %d) -> a_fragment: [%f, %f, %f, %f]\n", threadIdx.x,
+             //threadIdx.y, __half2float(a_frag[0]), __half2float(a_frag[1]),
+             //__half2float(a_frag[2]), __half2float(a_frag[3]));
+    //}G
+    for (int i = 0; i < 4; ++i) {
+      // Go down to the current k-tile and then get the 4 values starting at:
+      //    (tile * TILE_WIDTH + 4 * ty, blockIdx.y * TILE_WIDTH + tx)
+      // and load them into registers.
+      int bj = blockIdx.y * TILE_WIDTH + tx;
+      int bi = tile * TILE_WIDTH + 4 * ty + i;
+
+      // Since AWQ quantized, actually need to dequantize first.
+      int q_value = q[bi * (size_m / 8) + (bj / 8)];
+      int z_value = zeros[(bi / group_size) * (size_m / 8) + (bj / 8)];
+      int shift = kReverseAwqLookup[bj % 8] * 4;
+      int b_int4 = (q_value >> shift) & 0xF;
+      int z_int4 = (z_value >> shift) & 0xF;
+      half scale = scales[(bi / group_size) * size_m + bj];
+
+      b_frag[i] = __int2half_rn(b_int4 - z_int4) * scale;
+    }
+    //if (blockIdx.x == 0 && blockIdx.y == 0) {
+      //printf("[%d] (%d, %d) -> b_fragment: [%f, %f, %f, %f]\n", col, threadIdx.x,
+             //threadIdx.y, __half2float(b_frag[0]), __half2float(b_frag[1]),
+             //__half2float(b_frag[2]), __half2float(b_frag[3]));
+    //}
+
+    accumulator = __builtin_amdgcn_mfma_f32_16x16x16f16(a_frag, b_frag,
+                                                        accumulator, 0, 0, 0);
+  }
+
+  for (int i = 0; i < 4; ++i) {
+    // Starting row is (row / TILE_WIDTH) * TILE_WIDTH for this c-tile.
+    // So go to ((row / TILE_WIDTH) * TILE_WIDTH + 4 * ty, blockIdx.y * TILE_WIDTH + tx)
+    // and start writing values down the column.
+    int cj = blockIdx.y * TILE_WIDTH + tx;
+    int ci = (row / TILE_WIDTH) * TILE_WIDTH + ty * 4 + i;
+    c[ci * size_m + cj] = accumulator[i];
+  }
+}
+
 int main(int argc, char** argv) {
   constexpr uint32_t kMatrixSizeN = 128;
   constexpr uint32_t kMatrixSizeM = 128;
@@ -305,6 +394,14 @@ int main(int argc, char** argv) {
   Zeros(kMatrixSizeN, kMatrixSizeM, c);
   GenerateMatrix(kMatrixSizeK / kGroupSize, kMatrixSizeM / 8, zeros);
   GenerateMatrix(kMatrixSizeK / kGroupSize, kMatrixSizeM, scales);
+
+  PrintMatrix("a", kMatrixSizeN, kMatrixSizeK, a, -1, -1, -1, -1);
+
+  std::vector<half> b;
+  DequantizeMatrix(q.data(), zeros.data(), scales.data(), kMatrixSizeK,
+                   kMatrixSizeM, kGroupSize, b);
+  PrintMatrix("b", kMatrixSizeK, kMatrixSizeM, b, -1, -1, -1, -1);
+
   auto start_cpu = std::chrono::system_clock::now();
   awq_gemm_cpu(a.data(), q.data(), zeros.data(), scales.data(), kMatrixSizeN,
                kMatrixSizeK, kMatrixSizeM, kGroupSize, c.data());
@@ -334,57 +431,98 @@ int main(int argc, char** argv) {
   hip_array_zeros.CopyToDevice(zeros);
   hip_array_scales.CopyToDevice(scales);
 
-  constexpr uint32_t kTileWidth = 32;
-  constexpr uint32_t kTileSizeN = 32;
-  constexpr uint32_t kTileSizeM = 32;
-  constexpr uint32_t kTileSizeK = 32;
-  constexpr uint32_t kTileSize = kTileSizeN * kTileSizeM;
-  // constexpr uint32_t kThreadsPerBlockX = 8;
-  // constexpr uint32_t kThreadsPerBlockY = kSplitK;
-  constexpr uint32_t kThreadsPerBlockX = kTileSizeM;
-  constexpr uint32_t kThreadsPerBlockY = kTileSizeN;
-  constexpr uint32_t kNumTiles =
-      cdiv_const(kMatrixSizeM * kMatrixSizeN, kTileSizeM * kTileSizeN);
-  // constexpr uint32_t kNumBlocksX = cdiv_const(kNumTiles, kThreadsPerBlockX);
-  // constexpr uint32_t kNumBlocksY = 1;
-  // constexpr uint32_t kNumBlocksX = cdiv_const(kMatrixSizeM, kTileSizeM);
-  // constexpr uint32_t kNumBlocksY = cdiv_const(kMatrixSizeN, kTileSizeN);
-
-  constexpr uint32_t kNumBlocksX = CDIV(kMatrixSizeM, kTileWidth);
-  constexpr uint32_t kNumBlocksY = CDIV(kMatrixSizeN, kTileWidth);
-
   // x dimension processes tiles
   // y dimension does split-k
 
   // Attempt #2:
   // x dimension - cols
   // y dimension - rows
-  dim3 threads_per_block(kThreadsPerBlockX, kThreadsPerBlockY);
-  dim3 blocks(kNumBlocksX, kNumBlocksY);
+  bool useMfMa = true;
 
-  std::cout << "A = " << kMatrixSizeM << " x " << kMatrixSizeK << "\n";
-  std::cout << "Q = " << kMatrixSizeK / 8 << " x " << kMatrixSizeN << "\n";
-  std::cout << "C = " << kMatrixSizeM << " x " << kMatrixSizeN << "\n";
-  std::cout << "num_tiles = " << kNumTiles << "\n";
-  std::cout << "kTileSizeN = " << kTileSizeN << " kTileSizeK = " << kTileSizeK
-            << " kTileSizeM = " << kTileSizeM << "\n";
-  std::cout << "threads_per_block = (" << kThreadsPerBlockX << ","
-            << kThreadsPerBlockY << ")\n";
-  std::cout << "blocks = (" << kNumBlocksX << "," << kNumBlocksY << ")\n";
+  if (useMfMa) {
+    constexpr uint16_t kTileWidth = 16;
+    constexpr uint16_t kTileSizeN = 16;
+    constexpr uint16_t kTileSizeM = 16;
+    constexpr uint16_t kTileSizeK = 16;
+    constexpr uint32_t kTileSize = kTileSizeN * kTileSizeM;
+    constexpr uint32_t kThreadsPerBlockX = kTileSizeM;
+    constexpr uint32_t kThreadsPerBlockY = kTileSizeN;
+    constexpr uint32_t kNumTiles =
+        CDIV(kMatrixSizeM * kMatrixSizeN, kTileSizeM * kTileSizeN);
 
-  auto start = std::chrono::system_clock::now();
-  awq_gemm_kernel<kTileWidth><<<blocks, threads_per_block>>>(
-      hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
-      hip_array_scales.data(), kMatrixSizeN, kMatrixSizeK, kMatrixSizeM,
-      kGroupSize, kSplitK, hip_array_c.data());
-  CHECK_HIP(hipDeviceSynchronize());
-  auto end = std::chrono::system_clock::now();
-  std::cout << "GPU time: "
-            << std::chrono::duration_cast<std::chrono::milliseconds>(end -
-                                                                     start)
-                   .count()
-            << " ms \n";
+    constexpr uint32_t kNumBlocksX = CDIV(kMatrixSizeM, kTileWidth);
+    constexpr uint32_t kNumBlocksY = CDIV(kMatrixSizeN, kTileWidth);
+    dim3 threads_per_block(16, 4);
+    dim3 blocks(CDIV(kMatrixSizeM, kTileWidth), CDIV(kMatrixSizeN, kTileWidth));
 
+    std::cout << "A = " << kMatrixSizeM << " x " << kMatrixSizeK << "\n";
+    std::cout << "Q = " << kMatrixSizeK / 8 << " x " << kMatrixSizeN << "\n";
+    std::cout << "C = " << kMatrixSizeM << " x " << kMatrixSizeN << "\n";
+    std::cout << "num_tiles = " << CDIV(kMatrixSizeN * kMatrixSizeM, 16 * 16)
+              << "\n";
+    std::cout << "kTileSizeN = " << kTileSizeN << " kTileSizeK = " << kTileSizeK
+              << " kTileSizeM = " << kTileSizeM << "\n";
+    std::cout << "threads_per_block = (" << kThreadsPerBlockX << ","
+              << kThreadsPerBlockY << ")\n";
+    std::cout << "blocks = (" << kNumBlocksX << "," << kNumBlocksY << ")\n";
+
+    auto start = std::chrono::system_clock::now();
+    awq_gemm_mfma_kernel<kTileWidth><<<blocks, threads_per_block>>>(
+        hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
+        hip_array_scales.data(), kMatrixSizeN, kMatrixSizeK, kMatrixSizeM,
+        kGroupSize, kSplitK, hip_array_c.data());
+    CHECK_HIP(hipDeviceSynchronize());
+    auto end = std::chrono::system_clock::now();
+    std::cout << "GPU time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end -
+                                                                       start)
+                     .count()
+              << " ms \n";
+  } else {
+    constexpr uint32_t kTileWidth = 32;
+    constexpr uint32_t kTileSizeN = 32;
+    constexpr uint32_t kTileSizeM = 32;
+    constexpr uint32_t kTileSizeK = 32;
+    constexpr uint32_t kTileSize = kTileSizeN * kTileSizeM;
+    // constexpr uint32_t kThreadsPerBlockX = 8;
+    // constexpr uint32_t kThreadsPerBlockY = kSplitK;
+    constexpr uint32_t kThreadsPerBlockX = kTileSizeM;
+    constexpr uint32_t kThreadsPerBlockY = kTileSizeN;
+    constexpr uint32_t kNumTiles =
+        CDIV(kMatrixSizeM * kMatrixSizeN, kTileSizeM * kTileSizeN);
+    // constexpr uint32_t kNumBlocksX = cdiv_const(kNumTiles,
+    // kThreadsPerBlockX); constexpr uint32_t kNumBlocksY = 1; constexpr
+    // uint32_t kNumBlocksX = cdiv_const(kMatrixSizeM, kTileSizeM); constexpr
+    // uint32_t kNumBlocksY = cdiv_const(kMatrixSizeN, kTileSizeN);
+
+    constexpr uint32_t kNumBlocksX = CDIV(kMatrixSizeM, kTileWidth);
+    constexpr uint32_t kNumBlocksY = CDIV(kMatrixSizeN, kTileWidth);
+    dim3 threads_per_block(kThreadsPerBlockX, kThreadsPerBlockY);
+    dim3 blocks(kNumBlocksX, kNumBlocksY);
+
+    std::cout << "A = " << kMatrixSizeM << " x " << kMatrixSizeK << "\n";
+    std::cout << "Q = " << kMatrixSizeK / 8 << " x " << kMatrixSizeN << "\n";
+    std::cout << "C = " << kMatrixSizeM << " x " << kMatrixSizeN << "\n";
+    std::cout << "num_tiles = " << kNumTiles << "\n";
+    std::cout << "kTileSizeN = " << kTileSizeN << " kTileSizeK = " << kTileSizeK
+              << " kTileSizeM = " << kTileSizeM << "\n";
+    std::cout << "threads_per_block = (" << kThreadsPerBlockX << ","
+              << kThreadsPerBlockY << ")\n";
+    std::cout << "blocks = (" << kNumBlocksX << "," << kNumBlocksY << ")\n";
+
+    auto start = std::chrono::system_clock::now();
+    awq_gemm_kernel<kTileWidth><<<blocks, threads_per_block>>>(
+        hip_array_a.data(), hip_array_q.data(), hip_array_zeros.data(),
+        hip_array_scales.data(), kMatrixSizeN, kMatrixSizeK, kMatrixSizeM,
+        kGroupSize, kSplitK, hip_array_c.data());
+    CHECK_HIP(hipDeviceSynchronize());
+    auto end = std::chrono::system_clock::now();
+    std::cout << "GPU time: "
+              << std::chrono::duration_cast<std::chrono::milliseconds>(end -
+                                                                       start)
+                     .count()
+              << " ms \n";
+  }
   hip_array_c.CopyFromDevice(c_gpu);
   // std::vector<half> result;
   // Zeros(kMatrixSizeM, kMatrixSizeN, result);
