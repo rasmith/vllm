@@ -36,7 +36,7 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
 
   int tx = threadIdx.x;
   int ty = threadIdx.y;
-  int k = threadIdx.z; // Get k for splitK
+  int k = blockIdx.z;  // Get k for splitK
 
   // dim3 = (16, 4) = 64 threads per block, 1 wave
 
@@ -51,27 +51,26 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
 
   int num_tiles = CDIV(size_k, TILE_WIDTH);
 
-  //int tile_start = 0;
-  //int tile_end = CDIV(size_k, TILE_WIDTH);
+  // int tile_start = 0;
+  // int tile_end = CDIV(size_k, TILE_WIDTH);
 
   float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
   float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
   float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
 
-  //for (int tile = tile_start; tile < tile_end; ++tile) {
-  // Have CDIV(size_k, split_k * TILE_WIDTH) groups of tiles:
+  // for (int tile = tile_start; tile < tile_end; ++tile) {
+  //  Have CDIV(size_k, split_k * TILE_WIDTH) groups of tiles:
   //
-  //  --------------------------------------------
-  //       group_0      |       group_1     | ...
-  //  --------------------------------------------
-  //  0 ... split_k - 1 | 0 ... split_k - 1 | ...
-  //  --------------------------------------------
-  // 
-  // and this thread will work on:
-  //    threadIdx.z + i * split_k
-  // tiles.
+  //   --------------------------------------------
+  //        group_0      |       group_1     | ...
+  //   --------------------------------------------
+  //   0 ... split_k - 1 | 0 ... split_k - 1 | ...
+  //   --------------------------------------------
+  //
+  //  and this thread will work on:
+  //     threadIdx.z + i * split_k
+  //  tiles.
   for (int tile = k; tile < num_tiles; tile += split_k) {
-
     for (int i = 0; i < 4; ++i) {
       // Go down to the current row, and then over to the current k-tile
       // and then get the 4 values starting at:
@@ -147,11 +146,10 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   float output = 0.0f;
   int row = blockIdx.y * TILE_WIDTH + threadIdx.y;
   int col = blockIdx.x * TILE_WIDTH + threadIdx.x;
+  int k = blockIdx.z;
 
   __shared__ half a_tile[TILE_WIDTH][TILE_WIDTH];
   __shared__ half b_tile[TILE_WIDTH][TILE_WIDTH];
-  __shared__ int q_values[TILE_WIDTH][TILE_WIDTH / 8];
-  __shared__ int z_values[TILE_WIDTH][TILE_WIDTH / 8];
 
   int tile_start = 0;
   int tile_end = CDIV(size_k, TILE_WIDTH);
@@ -159,7 +157,9 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   int ty = threadIdx.y;
   int ay = row;
   int bx = col;
-  for (int tile = tile_start; tile < tile_end; ++tile) {
+  int num_tiles = CDIV(size_k, TILE_WIDTH);
+  //for (int tile = tile_start; tile < tile_end; ++tile) {
+  for (int tile = k; tile < num_tiles; tile += split_k) {
     int ax = tile * TILE_WIDTH + tx;
     if (ay < size_n && ax < size_k) {
       a_tile[ty][tx] = a[ay * size_k + ax];
@@ -190,7 +190,8 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   }
 
   if (row < size_n && col < size_m) {
-    c[row * size_m + col] = __float2half_rn(output);
+   //c[row * size_m + col] = __float2half_rn(output);
+    c[k * size_n * size_m + row * size_m + col] = __float2half_rn(output);
   }
 }
 
@@ -221,7 +222,6 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
   int* qzeros = reinterpret_cast<int*>(qzeros_tensor.data_ptr<int>());
   half* c = reinterpret_cast<half*>(result_tensor.data_ptr<at::Half>());
 
-  constexpr uint32_t kThreadsPerBlockX = 32;
   constexpr uint32_t kNumBlocksY = 1;
 
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -229,14 +229,10 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
   constexpr bool kUseMfma = true;
   constexpr int kTileWidth = (kUseMfma ? 16 : 32);
   if (kUseMfma) {
-    // std::cout << "blocks = (" << num_blocks_x << "," << kNumBlocksY << ")\n";
-    //  x dimension processes tiles
-    //  y dimension does split-k
-    // dim3 threads_per_block(kThreadsPerBlockX, threads_per_block_y);
-    dim3 threads_per_block(16, 4, splitK);
+    dim3 threads_per_block(16, 4);
     // dim3 blocks(num_blocks_x, kNumBlocksY);
     dim3 blocks(CDIV(size_n, kTileWidth),
-                CDIV(size_m, kTileWidth));  // CDIV(size_m, kTileWidth));
+                CDIV(size_m, kTileWidth), splitK);  // CDIV(size_m, kTileWidth));
     // std::cout << "threads_per_block.x = " << threads_per_block.x
     //<< ", threads_per_block.y = " << threads_per_block.y << "\n";
     // std::cout << "blocks.x = " << blocks.x
@@ -246,23 +242,16 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
         input, qweights, qzeros, scales, size_n, size_k, size_m, group_size,
         splitK, c);
   } else {
-    uint32_t threads_per_block_y = splitK;
-    uint32_t num_tiles =
-        std::min(1, CDIV(size_m * size_n, kTileWidth * kTileWidth));
-    uint32_t num_blocks_x = std::min(1, CDIV(num_tiles, kThreadsPerBlockX));
-
-    // std::cout << "blocks = (" << num_blocks_x << "," << kNumBlocksY << ")\n";
-    //  x dimension processes tiles
-    //  y dimension does split-k
-    // dim3 threads_per_block(kThreadsPerBlockX, threads_per_block_y);
     dim3 threads_per_block(kTileWidth, kTileWidth);
     // dim3 blocks(num_blocks_x, kNumBlocksY);
     dim3 blocks(CDIV(size_m, kTileWidth),
-                CDIV(size_n, kTileWidth));  // CDIV(size_m, kTileWidth));
-    // std::cout << "threads_per_block.x = " << threads_per_block.x
-    //<< ", threads_per_block.y = " << threads_per_block.y << "\n";
-    // std::cout << "blocks.x = " << blocks.x
-    //<< ", blocks.y = " << blocks.y << "\n";
+                CDIV(size_n, kTileWidth), splitK);  // CDIV(size_m, kTileWidth));
+    //std::cout << "threads_per_block.x = " << threads_per_block.x
+              //<< ", threads_per_block.y = " << threads_per_block.y
+              //<< ", threads_per_block.z = " << threads_per_block.z << "\n";
+    //std::cout << "blocks.x = " << blocks.x << ", blocks.y = " << blocks.y
+              //<< "\n";
+    //std::cout << "Launching kernel...\n";
 
     awq_gemm_kernel<kTileWidth><<<blocks, threads_per_block, 0, stream>>>(
         input, qweights, qzeros, scales, size_n, size_k, size_m, group_size,

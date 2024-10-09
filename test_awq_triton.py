@@ -216,11 +216,11 @@ def main():
     # N = 1
     # K = 3584
     # M = 448
-    N = 1 * 100
-    K = 128 * 10
-    M = 32 * 32
+    N = 32
+    K = 32
+    M = 32 
     splitK = 8
-    group_size = 16
+    group_size = 32
 
     test_gemm(N, K, M, splitK, group_size)
     # test_dequantize(1, 32, 16)
