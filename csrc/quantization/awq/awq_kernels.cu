@@ -25,8 +25,14 @@ __device__ void AtomicAdd(half* address, half val) {
 
 using float16_t = _Float16;
 using float32_t = float;
+
 using float16x4_t = float16_t __attribute__((ext_vector_type(4)));
 using float32x4_t = float32_t __attribute__((ext_vector_type(4)));
+
+template <int N>
+struct HalfN {
+  half h[N];
+};
 
 template <int TILE_WIDTH>
 __global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
@@ -38,29 +44,34 @@ __global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
   int ty = threadIdx.y;
   int k = blockIdx.z;  // Get k for splitK
 
-  // dim3 = (16, 4) = 64 threads per block, 1 wave
+  // dim3 = (16, 4, splitK) = 64 * splitK threads per block, splitK waves.
 
-  // NOTE: Even though the block size is (16, 4), each block is responsible
-  // for a 16 x 16 tile and has the 16 * 4 threads necessary to do the work.
-  // So, below uses TILE_WIDTH.
+  // NOTE: Even though the block size is (16, 4, splitK), each (16,4) group
+  // is responsible for a 16 x 16 tile and has the 16 * 4 threads necessary to
+  // do the work (mfma). So, below uses TILE_WIDTH and TILE_WIDTH needs to be
+  // 16, at least for now.
 
   // NOTE: The outputs will be (row, col), (row + 1, col), (row + 2, col)
   // and (row + 3, col).
 
-  // The row is the exact row to work on for pulling values for mfma from.
+  // The row is the row to work on for pulling values for mfma from.
   int row = blockIdx.x * TILE_WIDTH + tx;
-  // The output column that will be used.
+  // The output column that will be used and also used for pulling mfma values
+  // from the quantized matrix.
   int col = blockIdx.y * TILE_WIDTH + tx;
 
   int num_tiles = CDIV(size_k, TILE_WIDTH);
 
-  __shared__ int z_values[TILE_WIDTH / 8];
-  __shared__ half s_values[TILE_WIDTH];
-  __shared__ int q_values[TILE_WIDTH][TILE_WIDTH / 8];
+  __shared__ int z_values[TILE_WIDTH / 8];  // These are zero values.
+  __shared__ half s_values[TILE_WIDTH];     // These are scale values.
+  __shared__ int q_values[TILE_WIDTH]
+                         [TILE_WIDTH / 8];  // These are quantized AWQ values.
 
+  // Vectorized values, correspond to registers, cannot take address of any of
+  // these.  I tried, and the compiler told me no.
   float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
-  float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
-  float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
+  float16x4_t b_frag(0.0);
+  float32x4_t accumulator(0.0);
 
   //  Have CDIV(size_k, split_k * TILE_WIDTH) groups of tiles:
   //
@@ -72,44 +83,107 @@ __global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
   //
   //  and this thread will work on tiles with "tile index"
   //     threadIdx.z + i * split_k
+  // for i = 0, .. , cdiv(size_k, split_k * TILE_WIDTH)
+  //
   for (int tile = k; tile < num_tiles; tile += split_k) {
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      // Go down to the current row, and then over to the current k-tile
-      // and then get the 4 values starting at:
-      //    (row, tile * TILE_WIDTH + 4 * ty)
-      // and load them into registers.
-      int aj = tile * TILE_WIDTH + 4 * ty + i;
-      int ai = row;
+    if (row >= 0 && row < size_n) {
+      int base_col = tile * TILE_WIDTH + 4 * ty;
+      int offset = row * size_k + base_col;
 
-      if (ai >= 0 && ai < size_n && aj >= 0 && aj < size_k) {
-        a_frag[i] = a[ai * size_k + aj];
-      } else {
-        a_frag[i] = __ushort_as_half(0);
+      // Load 8 bytes at a time for better memory performance, if possible.
+      // Need to deal with the case where the tile falls off the
+      // edge though, but still trying to load contiguous values whenever
+      // possible, with the hope that some coalescing will occur along with
+      // vectorized load.
+
+      // NOTE: Could try using uint2 maybe or some other vectorized type.
+      // Could also try loading into shared memory first.
+      if (base_col < size_k) {
+        HalfN<4> h = *reinterpret_cast<HalfN<4>*>(&a[offset]);
+        a_frag[0] = h.h[0];
+        a_frag[1] = h.h[1];
+        a_frag[2] = h.h[2];
+        a_frag[3] = h.h[3];
+      } else if (base_col + 2 < size_k) {
+        HalfN<3> h = *reinterpret_cast<HalfN<3>*>(&a[offset]);
+        a_frag[0] = h.h[0];
+        a_frag[1] = h.h[1];
+        a_frag[2] = h.h[2];
+        a_frag[3] = __ushort_as_half(0);
+      } else if (base_col + 1 < size_k) {
+        HalfN<2> h = *reinterpret_cast<HalfN<2>*>(&a[offset]);
+        a_frag[0] = h.h[0];
+        a_frag[1] = h.h[1];
+        a_frag[2] = __ushort_as_half(0);
+        a_frag[3] = __ushort_as_half(0);
+      } else if (base_col < size_k) {
+        a_frag[0] = a[offset];
+        a_frag[1] = __ushort_as_half(0);
+        a_frag[2] = __ushort_as_half(0);
+        a_frag[3] = __ushort_as_half(0);
       }
+    } else {
+      a_frag[0] = __ushort_as_half(0);
+      a_frag[1] = __ushort_as_half(0);
+      a_frag[2] = __ushort_as_half(0);
+      a_frag[3] = __ushort_as_half(0);
     }
 
+    // This was the code for above, but using the above gave a nice improvement.
+    // Keeping around for now, since below is more readable, with "readibility"
+    // benig a relative concept in this scenario.
+
+    //#pragma unroll
+    // for (int i = 0; i < 4; ++i) {
+    //// Go down to the current row, and then over to the current k-tile
+    //// and then get the 4 values starting at:
+    ////    (row, tile * TILE_WIDTH + 4 * ty)
+    //// and load them into registers.
+    // int a_j = tile * TILE_WIDTH + 4 * ty + i;
+    // int a_i = row;
+
+    // if (a_i >= 0 && a_i < size_n && a_j >= 0 && a_j < size_k) {
+    // a_frag[i] = a[a_i * size_k + a_j];
+    //} else {
+    // a_frag[i] = __ushort_as_half(0);
+    //}
+    //}
+
+    // OK, threads per block are (x, y, z) = (16, 4, splitK).
+    // Have y = 0  , x = 0:15, z = 0:splitK - 1 load the zeros.
+    // Have y = 1  , x = 0:15, z = 0:splitK - 1 load the scales.
+    // Have y = 2:3, x = 0:15, z = 0:splitK - 1 load quantized values from q.
+    // Hopefully, this hides some latency and helps minimize divergence.
+    //
+    // NOTE: This gets loaded into shared memory, and zeros are recorded
+    // when out of bounds access would have happened, so the mfma code
+    // can just load straight values.
+    //
+    // NOTE: Where the quantized values below are being loaded, could load
+    // those into registers, and then do a cross-lane exchange after the
+    // if-statement.  This would eliminate the need for the q_values array.
+    // Might need an additional synchthreads.
     if (ty == 0) {
-      int zrow = tile * TILE_WIDTH / group_size;
-      int zcol = col / 8;
-      if (zrow < size_k / group_size && zcol < size_m / 8) {
-        z_values[tx / 8] = zeros[zrow * (size_m / 8) + zcol];
+      int z_row = tile * TILE_WIDTH / group_size;
+      int z_col = col / 8;
+      if (z_row < size_k / group_size && z_col < size_m / 8) {
+        z_values[tx / 8] = zeros[z_row * (size_m / 8) + z_col];
       } else {
         z_values[tx / 8] = 0;
       }
     } else if (ty == 1) {
-      int srow = tile * TILE_WIDTH / group_size;
-      int scol = col;
-      if (srow < size_k / group_size && scol < size_m) {
-        s_values[tx] = scales[srow * size_m + scol];
+      int s_row = tile * TILE_WIDTH / group_size;
+      int s_col = col;
+      if (s_row < size_k / group_size && s_col < size_m) {
+        s_values[tx] = scales[s_row * size_m + s_col];
       } else {
         s_values[tx] = __ushort_as_half(0);
       }
     } else {
-      int qrow = tile * TILE_WIDTH + tx;
-      int qcol = blockIdx.y * TILE_WIDTH / 8 + ty % 2;
-      if (qrow < size_k && qcol < size_m / 8) {
-        q_values[tx][ty % 2] = q[qrow * (size_m / 8) + qcol];
+      int q_row = tile * TILE_WIDTH + tx;
+      int q_col = blockIdx.y * TILE_WIDTH / 8 + ty % 2;
+      if (q_row < size_k && q_col < size_m / 8) {
+        q_values[tx][ty % 2] = q[q_row * (size_m / 8) + q_col];
       } else {
         q_values[tx][ty % 2] = 0;
       }
@@ -130,12 +204,21 @@ __global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
 
       // Although, really we're just getting the values from LDS.
 
-      int bj = col;
-      int bi = tile * TILE_WIDTH + 4 * ty + i;
+      int b_j = col;
+      int b_i = tile * TILE_WIDTH + 4 * ty + i;
+
+      // NOTE: Loading values in this way seems not great, would like to load
+      // contiguous values.  Could load contiguously and then use cross-lane
+      // intrinsics to exchange values. Basically, load directly into registers,
+      // and then shuffle or DPP the values into the threads that need them.
+      //
+      // Could also just try shared memory, but I think cross-lane is more
+      // efficient since moving the data into registers and then exchanging
+      // will have less latency.
       int q_value = q_values[4 * ty + i][tx / 8];
 
       int z_value = z_values[tx / 8];
-      int shift = kReverseAwqLookup[bj % 8] * 4;
+      int shift = kReverseAwqLookup[b_j % 8] * 4;
       int b_int4 = (q_value >> shift) & 0xF;
       int z_int4 = (z_value >> shift) & 0xF;
       half scale = s_values[tx];
@@ -163,10 +246,14 @@ __global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
     // Starting row is (row / TILE_WIDTH) * TILE_WIDTH for this c-tile.
     // So go to ((row / TILE_WIDTH) * TILE_WIDTH + 4 * ty, blockIdx.y *
     // TILE_WIDTH + tx) and start writing values down the column.
-    int cj = col;
-    int ci = (row / TILE_WIDTH) * TILE_WIDTH + ty * 4 + i;
-    if (ci >= 0 && ci < size_n && cj >= 0 && cj < size_m) {
-      c[k * size_m * size_n + ci * size_m + cj] = accumulator[i];
+    int c_j = col;
+    int c_i = (row / TILE_WIDTH) * TILE_WIDTH + ty * 4 + i;
+
+    // NOTE: Same idea as with loading the quantized values, this memory
+    // access pattern seems bad, so could try using cross-lane, and then
+    // storing contiguous values.
+    if (c_i >= 0 && c_i < size_n && c_j >= 0 && c_j < size_m) {
+      c[k * size_m * size_n + c_i * size_m + c_j] = accumulator[i];
     }
   }
   __syncthreads();
@@ -192,7 +279,7 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   int ay = row;
   int bx = col;
   int num_tiles = CDIV(size_k, TILE_WIDTH);
-  // for (int tile = tile_start; tile < tile_end; ++tile) {
+
   for (int tile = k; tile < num_tiles; tile += split_k) {
     int ax = tile * TILE_WIDTH + tx;
     if (ay < size_n && ax < size_k) {
@@ -224,7 +311,6 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   }
 
   if (row < size_n && col < size_m) {
-    // c[row * size_m + col] = __float2half_rn(output);
     c[k * size_n * size_m + row * size_m + col] = __float2half_rn(output);
   }
 }
@@ -256,15 +342,12 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
   int* qzeros = reinterpret_cast<int*>(qzeros_tensor.data_ptr<int>());
   half* c = reinterpret_cast<half*>(result_tensor.data_ptr<at::Half>());
 
-  constexpr uint32_t kNumBlocksY = 1;
-
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   constexpr bool kUseMfma = true;
   constexpr int kTileWidth = (kUseMfma ? 16 : 32);
   if (kUseMfma) {
     dim3 threads_per_block(16, 4);
-    // dim3 blocks(num_blocks_x, kNumBlocksY);
     dim3 blocks(CDIV(size_n, kTileWidth), CDIV(size_m, kTileWidth),
                 splitK);  // CDIV(size_m, kTileWidth));
     // std::cout << "threads_per_block.x = " << threads_per_block.x
@@ -277,7 +360,6 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
         splitK, c);
   } else {
     dim3 threads_per_block(kTileWidth, kTileWidth);
-    // dim3 blocks(num_blocks_x, kNumBlocksY);
     dim3 blocks(CDIV(size_m, kTileWidth), CDIV(size_n, kTileWidth),
                 splitK);  // CDIV(size_m, kTileWidth));
     // std::cout << "threads_per_block.x = " << threads_per_block.x
