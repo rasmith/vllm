@@ -472,9 +472,9 @@ int main(int argc, char** argv) {
   // Attempt #2:
   // x dimension - cols
   // y dimension - rows
-  bool useMfMa = true;
+  bool use_mfma = true;
 
-  if (useMfMa) {
+  if (use_mfma) {
     constexpr uint16_t kTileWidth = 16;
     constexpr uint16_t kTileSizeN = 16;
     constexpr uint16_t kTileSizeM = 16;

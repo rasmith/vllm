@@ -485,14 +485,22 @@ def cutlass_scaled_mm(a: torch.Tensor,
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
         1] and bias.dtype == out_dtype
+    print(f"a.shape = {a.shape}, b.shape = {b.shape}, "
+          f"scale_a.shape = {scale_a.shape}, scale_b.shape = {scale_b.shape}, "
+          f"out_dtype = {out_dtype}, bias.shape = {None if bias is None else bias.shape}, "
+          f"b_type = {b.dtype}")
+    # import traceback
+    # traceback.print_stack()
 
-    m = a.shape[0]
-    n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    # m = a.shape[0]
+    # n = b.shape[1]
+    # out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    # torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    fake = torch.zeros((a.shape[0], b.shape[1]), dtype = out_dtype, device = a.device);
 
-    return out
+    # return out
+    return fake
 
 
 def cutlass_scaled_mm_azp(a: torch.Tensor,

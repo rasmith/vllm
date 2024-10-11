@@ -155,9 +155,9 @@ def test_gemm(N, K, M, splitK, group_size):
                         dtype=scales_dtype,
                         device=device)
 
-    output_triton = torch.ops._rocm_C.awq_gemm_test(input, qweight, scales, qzeros, split_k_iters)
-    # output_triton = awq_gemm_triton(input, qweight, scales, qzeros,
-                                    # split_k_iters)
+    # output_triton = torch.ops._rocm_C.awq_gemm_test(input, qweight, scales, qzeros, split_k_iters)
+    output_triton = awq_gemm_triton(input, qweight, scales, qzeros,
+                                    split_k_iters)
 
     assert (not torch.any(torch.isinf(output_triton))
             and not torch.any(torch.isnan(output_triton)))

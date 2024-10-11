@@ -133,6 +133,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
+        print(f"self.cutlass_fp8_supported = {self.cutlass_fp8_supported}")
         return apply_fp8_linear(
             input=x,
             weight=layer.weight,

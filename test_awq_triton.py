@@ -60,9 +60,7 @@ def awq_dequantize_torch(qweight: torch.Tensor, scales: torch.Tensor,
 
     scales = scales.repeat_interleave(group_size, dim=0)
     zeros = zeros.repeat_interleave(group_size, dim=0)
-    print(f"iweights.shape = {iweights.shape}, zeros.shape = {zeros.shape}"
-          f", scales.shape = {scales.shape}")
-    return (iweights - zeros) * scales, scales, zeros, iweights, qv, zv
+    return (iweights - zeros) * scales
 
 
 # qweights - [R     , C // 8], int32
@@ -98,13 +96,21 @@ def test_dequantize(qweight_rows, qweight_cols, group_size):
                           dtype=zeros_dtype,
                           device=device)
 
-    iweights_triton = awq_dequantize_triton(qweight, scales, zeros)
+    block_size_x = 32
+    block_size_y = 32
+    if group_size == 16 or group_size == 8:
+        block_size_x = group_size
+        block_size_y = group_size
+
+    iweights_triton = awq_dequantize_triton(qweight, scales, zeros, block_size_x, block_size_y)
 
     assert (not torch.any(torch.isinf(iweights_triton))
             and not torch.any(torch.isnan(iweights_triton)))
 
     iweights_torch = awq_dequantize_torch(qweight, scales, zeros, group_size)
 
+    print(f"iweights_torch = {iweights_torch}")
+    print(f"iweights_triton = {iweights_triton}")
     torch.testing.assert_close(iweights_triton, iweights_torch)
 
 
@@ -167,7 +173,7 @@ def test_gemm(N, K, M, splitK, group_size):
 
     start_cpu = time.time()
     # dequantized_weights = awq_dequantize_triton(qweight, scales, qzeros)
-    dequantized_weights,ss,zz,iw,qv,zv= awq_dequantize_torch(qweight.detach().cpu(), 
+    dequantized_weights= awq_dequantize_torch(qweight.detach().cpu(), 
                 scales.detach().cpu(), qzeros.detach().cpu(), group_size)
     # torch.set_printoptions(threshold=10_000, sci_mode=False)
     # print(f"dequantized_weights[:, 1] = {dequantized_weights[:, 1]}")
@@ -216,14 +222,18 @@ def main():
     # N = 1
     # K = 3584
     # M = 448
-    N = 32
-    K = 32
-    M = 32 
+    N = 128
+    K = 128
+    M = 128
     splitK = 8
-    group_size = 32
+    group_size = 32 
 
     test_gemm(N, K, M, splitK, group_size)
-    # test_dequantize(1, 32, 16)
+    # qweight_rows = 128, qweight_cols = 32, group_size = 16
+    # qweight_rows = 128
+    # qweight_cols = 32
+    # group_size = 16
+    # test_dequantize(qweight_rows, qweight_cols, group_size)
 
 if __name__ == "__main__":
     main()

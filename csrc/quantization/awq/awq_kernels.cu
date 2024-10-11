@@ -29,9 +29,9 @@ using float16x4_t = float16_t __attribute__((ext_vector_type(4)));
 using float32x4_t = float32_t __attribute__((ext_vector_type(4)));
 
 template <int TILE_WIDTH>
-__global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
-                                     int size_n, int size_k, int size_m,
-                                     int group_size, int split_k, half* c) {
+__global__ __launch_bounds__(128) void awq_gemm_mfma_kernel(
+    half* a, int* q, int* zeros, half* scales, int size_n, int size_k,
+    int size_m, int group_size, int split_k, half* c) {
   __constant__ static const int kReverseAwqLookup[8] = {0, 4, 1, 5, 2, 6, 3, 7};
 
   int tx = threadIdx.x;
@@ -44,21 +44,24 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
   // for a 16 x 16 tile and has the 16 * 4 threads necessary to do the work.
   // So, below uses TILE_WIDTH.
 
+  // NOTE: The outputs will be (row, col), (row + 1, col), (row + 2, col)
+  // and (row + 3, col).
+
   // The row is the exact row to work on for pulling values for mfma from.
   int row = blockIdx.x * TILE_WIDTH + tx;
-  // The column currently being worked on.
+  // The output column that will be used.
   int col = blockIdx.y * TILE_WIDTH + tx;
 
   int num_tiles = CDIV(size_k, TILE_WIDTH);
 
-  // int tile_start = 0;
-  // int tile_end = CDIV(size_k, TILE_WIDTH);
+  __shared__ int z_values[TILE_WIDTH / 8];
+  __shared__ half s_values[TILE_WIDTH];
+  __shared__ int q_values[TILE_WIDTH][TILE_WIDTH / 8];
 
   float16x4_t a_frag{0.0, 0.0, 0.0, 0.0};
   float16x4_t b_frag{0.0, 0.0, 0.0, 0.0};
   float32x4_t accumulator{0.0, 0.0, 0.0, 0.0};
 
-  // for (int tile = tile_start; tile < tile_end; ++tile) {
   //  Have CDIV(size_k, split_k * TILE_WIDTH) groups of tiles:
   //
   //   --------------------------------------------
@@ -67,10 +70,10 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
   //   0 ... split_k - 1 | 0 ... split_k - 1 | ...
   //   --------------------------------------------
   //
-  //  and this thread will work on:
+  //  and this thread will work on tiles with "tile index"
   //     threadIdx.z + i * split_k
-  //  tiles.
   for (int tile = k; tile < num_tiles; tile += split_k) {
+#pragma unroll
     for (int i = 0; i < 4; ++i) {
       // Go down to the current row, and then over to the current k-tile
       // and then get the 4 values starting at:
@@ -86,30 +89,59 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
       }
     }
 
-    // if (blockIdx.x == 0 && blockIdx.y == 0) {
-    // printf("(%d, %d) -> a_fragment: [%.3f, %.3f, %.3f, %.3f]\n", threadIdx.x,
-    // threadIdx.y, __half2float(a_frag[0]), __half2float(a_frag[1]),
-    //__half2float(a_frag[2]), __half2float(a_frag[3]));
-    //}
+    if (ty == 0) {
+      int zrow = tile * TILE_WIDTH / group_size;
+      int zcol = col / 8;
+      if (zrow < size_k / group_size && zcol < size_m / 8) {
+        z_values[tx / 8] = zeros[zrow * (size_m / 8) + zcol];
+      } else {
+        z_values[tx / 8] = 0;
+      }
+    } else if (ty == 1) {
+      int srow = tile * TILE_WIDTH / group_size;
+      int scol = col;
+      if (srow < size_k / group_size && scol < size_m) {
+        s_values[tx] = scales[srow * size_m + scol];
+      } else {
+        s_values[tx] = __ushort_as_half(0);
+      }
+    } else {
+      int qrow = tile * TILE_WIDTH + tx;
+      int qcol = blockIdx.y * TILE_WIDTH / 8 + ty % 2;
+      if (qrow < size_k && qcol < size_m / 8) {
+        q_values[tx][ty % 2] = q[qrow * (size_m / 8) + qcol];
+      } else {
+        q_values[tx][ty % 2] = 0;
+      }
+    }
+
+    __syncthreads();
+
+// if (blockIdx.x == 0 && blockIdx.y == 0) {
+// printf("(%d, %d) -> a_fragment: [%.3f, %.3f, %.3f, %.3f]\n", threadIdx.x,
+// threadIdx.y, __half2float(a_frag[0]), __half2float(a_frag[1]),
+//__half2float(a_frag[2]), __half2float(a_frag[3]));
+//}
+#pragma unroll
     for (int i = 0; i < 4; ++i) {
       // Go down to the current k-tile and then get the 4 values starting at:
       //    (tile * TILE_WIDTH + 4 * ty, col)
       // and load them into registers.
+
+      // Although, really we're just getting the values from LDS.
+
       int bj = col;
       int bi = tile * TILE_WIDTH + 4 * ty + i;
+      int q_value = q_values[4 * ty + i][tx / 8];
+
+      int z_value = z_values[tx / 8];
+      int shift = kReverseAwqLookup[bj % 8] * 4;
+      int b_int4 = (q_value >> shift) & 0xF;
+      int z_int4 = (z_value >> shift) & 0xF;
+      half scale = s_values[tx];
 
       // Since AWQ quantized, actually need to dequantize first.
-      if (bi >= 0 && bi < size_k && bj >= 0 && bj < size_m) {
-        int q_value = q[bi * (size_m / 8) + (bj / 8)];
-        int z_value = zeros[(bi / group_size) * (size_m / 8) + (bj / 8)];
-        int shift = kReverseAwqLookup[bj % 8] * 4;
-        int b_int4 = (q_value >> shift) & 0xF;
-        int z_int4 = (z_value >> shift) & 0xF;
-        half scale = scales[(bi / group_size) * size_m + bj];
-        b_frag[i] = __int2half_rn(b_int4 - z_int4) * scale;
-      } else {
-        b_frag[i] = __ushort_as_half(0);
-      }
+      b_frag[i] = __int2half_rn(b_int4 - z_int4) * scale;
     }
     // if (blockIdx.x == 0 && blockIdx.y == 0) {
     // printf("[%d] (%d, %d) -> b_fragment: [%.3f, %.3f, %.3f, %.3f]\n", col,
@@ -122,10 +154,11 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
                                                         accumulator, 0, 0, 0);
   }
 
-  // printf("[%d, %d] %.3f %.3f %.3f %.3f\n", tx, ty,
-  // __half2float(accumulator[0]),
-  //__half2float(accumulator[1]), __half2float(accumulator[2]),
-  //__half2float(accumulator[3]));
+// printf("[%d, %d] %.3f %.3f %.3f %.3f\n", tx, ty,
+// __half2float(accumulator[0]),
+//__half2float(accumulator[1]), __half2float(accumulator[2]),
+//__half2float(accumulator[3]));
+#pragma unroll
   for (int i = 0; i < 4; ++i) {
     // Starting row is (row / TILE_WIDTH) * TILE_WIDTH for this c-tile.
     // So go to ((row / TILE_WIDTH) * TILE_WIDTH + 4 * ty, blockIdx.y *
@@ -136,6 +169,7 @@ __global__ void awq_gemm_mfma_kernel(half* a, int* q, int* zeros, half* scales,
       c[k * size_m * size_n + ci * size_m + cj] = accumulator[i];
     }
   }
+  __syncthreads();
 }
 
 template <int TILE_WIDTH>
@@ -158,7 +192,7 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   int ay = row;
   int bx = col;
   int num_tiles = CDIV(size_k, TILE_WIDTH);
-  //for (int tile = tile_start; tile < tile_end; ++tile) {
+  // for (int tile = tile_start; tile < tile_end; ++tile) {
   for (int tile = k; tile < num_tiles; tile += split_k) {
     int ax = tile * TILE_WIDTH + tx;
     if (ay < size_n && ax < size_k) {
@@ -171,7 +205,7 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
 
     if (by < size_k && bx < size_m) {
       half scale = scales[(by / group_size) * size_m + bx];
-      int q_value = q[by * (size_m / 8) + (bx / 8)];
+      int q_value = q[(by / group_size) * (size_m / 8) + (bx / 8)];
       int z_value = zeros[(by / group_size) * (size_m / 8) + (bx / 8)];
       int shift = kReverseAwqLookup[bx % 8] * 4;
       int b_int4 = (q_value >> shift) & 0xF;
@@ -190,7 +224,7 @@ __global__ void awq_gemm_kernel(half* a, int* q, int* zeros, half* scales,
   }
 
   if (row < size_n && col < size_m) {
-   //c[row * size_m + col] = __float2half_rn(output);
+    // c[row * size_m + col] = __float2half_rn(output);
     c[k * size_n * size_m + row * size_m + col] = __float2half_rn(output);
   }
 }
@@ -231,8 +265,8 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
   if (kUseMfma) {
     dim3 threads_per_block(16, 4);
     // dim3 blocks(num_blocks_x, kNumBlocksY);
-    dim3 blocks(CDIV(size_n, kTileWidth),
-                CDIV(size_m, kTileWidth), splitK);  // CDIV(size_m, kTileWidth));
+    dim3 blocks(CDIV(size_n, kTileWidth), CDIV(size_m, kTileWidth),
+                splitK);  // CDIV(size_m, kTileWidth));
     // std::cout << "threads_per_block.x = " << threads_per_block.x
     //<< ", threads_per_block.y = " << threads_per_block.y << "\n";
     // std::cout << "blocks.x = " << blocks.x
@@ -244,14 +278,14 @@ torch::Tensor awq_gemm_test(torch::Tensor input_tensor,
   } else {
     dim3 threads_per_block(kTileWidth, kTileWidth);
     // dim3 blocks(num_blocks_x, kNumBlocksY);
-    dim3 blocks(CDIV(size_m, kTileWidth),
-                CDIV(size_n, kTileWidth), splitK);  // CDIV(size_m, kTileWidth));
-    //std::cout << "threads_per_block.x = " << threads_per_block.x
-              //<< ", threads_per_block.y = " << threads_per_block.y
-              //<< ", threads_per_block.z = " << threads_per_block.z << "\n";
-    //std::cout << "blocks.x = " << blocks.x << ", blocks.y = " << blocks.y
-              //<< "\n";
-    //std::cout << "Launching kernel...\n";
+    dim3 blocks(CDIV(size_m, kTileWidth), CDIV(size_n, kTileWidth),
+                splitK);  // CDIV(size_m, kTileWidth));
+    // std::cout << "threads_per_block.x = " << threads_per_block.x
+    //<< ", threads_per_block.y = " << threads_per_block.y
+    //<< ", threads_per_block.z = " << threads_per_block.z << "\n";
+    // std::cout << "blocks.x = " << blocks.x << ", blocks.y = " << blocks.y
+    //<< "\n";
+    // std::cout << "Launching kernel...\n";
 
     awq_gemm_kernel<kTileWidth><<<blocks, threads_per_block, 0, stream>>>(
         input, qweights, qzeros, scales, size_n, size_k, size_m, group_size,

@@ -231,6 +231,7 @@ def awq_dequantize_triton(qweight: torch.Tensor,
     assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
     assert group_size <= K
     assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
+    assert block_size_y <= group_size and group_size % block_size_x == 0
 
     # Result tensor:
     # number of rows = same as input tensor
