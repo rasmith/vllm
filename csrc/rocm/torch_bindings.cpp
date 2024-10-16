@@ -29,6 +29,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                str kv_cache_dtype,"
       "                float k_scale, float v_scale) -> ()");
   rocm_ops.impl("paged_attention", torch::kCUDA, &paged_attention);
+
+  // w8a8 GEMM, supporting symmetric per-tensor or per-row/column
+  // quantization, as well as bias
+  rocm_ops.def(
+      "hip_scaled_mm(Tensor! out, Tensor a,"
+      "              Tensor b, Tensor a_scales,"
+      "              Tensor b_scales, Tensor? bias) -> ()");
+  rocm_ops.impl("hip_scaled_mm", torch::kCUDA, &hip_scaled_mm);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

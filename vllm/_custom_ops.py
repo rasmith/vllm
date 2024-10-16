@@ -507,11 +507,12 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     m = a.shape[0]
     n = b.shape[1]
-    # out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     # torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+    torch.ops._rocm_C.hip_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
-    out = torch.zeros((m, n), dtype=out_dtype, device=a.device)
+    # out = torch.zeros((m, n), dtype=out_dtype, device=a.device)
     return out
 
 

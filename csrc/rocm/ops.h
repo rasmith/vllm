@@ -12,3 +12,8 @@ void paged_attention(torch::Tensor& out, torch::Tensor& exp_sums,
                      const c10::optional<torch::Tensor>& alibi_slopes,
                      const std::string& kv_cache_dtype, double k_scale,
                      double v_scale);
+
+void hip_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
+                   torch::Tensor const& b, torch::Tensor const& a_scales,
+                   torch::Tensor const& b_scales,
+                   c10::optional<torch::Tensor> const& bias);
