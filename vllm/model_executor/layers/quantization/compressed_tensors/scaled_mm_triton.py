@@ -250,7 +250,59 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     tl.store(c_ptrs, c, mask=c_mask)
 
 
-# input   - [M, K]
+def lookup_config(M, K, N, has_scalar_a, has_scalar_b):
+    shapes = {
+        (1, 17920, 5120),
+        (1, 5120, 35840),
+        (1, 5120, 5120),
+        (1, 5120, 7680),
+        (131072, 17920, 5120),
+        (131072, 5120, 35840),
+        (131072, 5120, 5120),
+        (131072, 5120, 7680),
+        (15, 17920, 5120),
+        (15, 5120, 35840),
+        (15, 5120, 5120),
+        (15, 5120, 7680),
+    }
+    # BLOCK_SIZE_M  BLOCK_SIZE_N  BLOCK_SIZE_K  SPLIT_K  GROUP_SIZE_M  num_warps  mfma  kpack
+    configs = [
+        # (1, 17920, 5120), (true, true), (false, true), (true, false)
+        {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "SPLIT_K": 8,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 1,
+            "mfma": 16,
+            "kpack": 1,
+        },
+        # (1, 17920, 5120), (false, false)
+        {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "SPLIT_K": 8,
+            "GROUP_SIZE_M": 16,
+            "num_warps": 8,
+            "mfma": 32,
+            "kpack": 2,
+        },
+        {
+            "BLOCK_SIZE_M": 16,
+            "BLOCK_SIZE_N": 32,
+            "BLOCK_SIZE_K": 32,
+            "SPLIT_K": 8,
+            "GROUP_SIZE_M": 1,
+            "num_warps": 1,
+            "mfma": 16,
+            "kpack": 1,
+        },
+    ]
+
+
+# input   - [M, K
 # weight - [K, N]
 def scaled_mm_triton(input: torch.Tensor,
                      weight: torch.Tensor,
