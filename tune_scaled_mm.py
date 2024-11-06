@@ -57,12 +57,8 @@ def collect_results(result_configs, M, N, K, use_scalar_scale_a,
     best_configs = [row.to_dict() for index, row in best_configs.iterrows()]
     baseline = baseline.iloc[0].to_dict()
 
-    # print(f"baseline = {baseline}")
     for best_config in best_configs:
         best_config['speedup'] = baseline['Triton'] / best_config['Triton']
-    # print(f"baseline={baseline}")
-    # print(f"best[M={M},K={K},N={N}]=")
-    # print(f"{best_configs}")
 
     result = {
         'M': M,
@@ -90,16 +86,13 @@ def run_benchmark(update_callback, a, b, scale_a, scale_b, out_dtype, bias,
     warmup = 20
     rep = 100
     num_choices = len(config_choices_list)
-    # print(f"num_choices = {num_choices}")
 
     tune_benchmark_obj = triton.testing.Benchmark(
         x_names=[
             "BLOCK_SIZE_M", "BLOCK_SIZE_N", "BLOCK_SIZE_K", "SPLIT_K",
             "GROUP_SIZE_M", "num_warps", "mfma", "kpack"
         ],
-        # x_vals=filter(prune_config_choices(M, K, N), config_choices()),
-        x_vals=
-        config_choices_list,  #tqdm(config_choices_list, total=num_choices),
+        x_vals=config_choices_list,
         x_log=True,
         line_arg="provider",
         line_vals=["triton"],
@@ -113,21 +106,6 @@ def run_benchmark(update_callback, a, b, scale_a, scale_b, out_dtype, bias,
     @triton.testing.perf_report(tune_benchmark_obj)
     def bench_config(BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, SPLIT_K,
                      GROUP_SIZE_M, num_warps, mfma, kpack, provider):
-        # print(f"BLOCK_SIZE_M = {BLOCK_SIZE_M} "
-        # f"BLOCK_SIZE_N = {BLOCK_SIZE_N} "
-        # f"BLOCK_SIZE_K = {BLOCK_SIZE_K} "
-        # f"SPLIT_K = {SPLIT_K} "
-        # f"GROUP_SIZE_M = {GROUP_SIZE_M} "
-        # f"num_warps = {num_warps} "
-        # f"mfma  = {mfma} "
-        # f"kpack = {kpack} "
-        # f"out_dtype = {out_dtype} "
-        # f"a = {a} "
-        # f"b = {b} "
-        # f"scale_a = {scale_a} "
-        # f"scale_b = {scale_b} "
-        # f"bias = {bias}")
-
         bench_function = lambda: scaled_mm_triton(
             a, b, scale_a, scale_b, out_dtype, bias, BLOCK_SIZE_M,
             BLOCK_SIZE_N, BLOCK_SIZE_K, GROUP_SIZE_M, SPLIT_K, num_warps, mfma,
@@ -143,7 +121,7 @@ def run_benchmark(update_callback, a, b, scale_a, scale_b, out_dtype, bias,
     return result_data_frames
 
 
-def tune(update_callback, event_queue, output_file):
+def tune(update_callback, start_callback, event_queue, output_file):
     import torch
     import triton
     import triton.language as tl
@@ -190,14 +168,19 @@ def tune(update_callback, event_queue, output_file):
 
     torch.manual_seed(0)
 
+    num_shapes = len(list(shapes))
+    num_scales = len(list(scale_choices()))
+    num_choices = len(list(config_choices()))
+
+    num_total_benchmarks = num_shapes * num_scales * num_choices
+    start_callback(num_total_benchmarks)
+
     results = {}
     for shape in shapes:
-        # print(f"shape = {shape}")
         M, K, N = shape
         a = torch.randint(0, 127, (M, K), dtype=torch.int8, device='cuda')
         b = torch.randint(0, 127, (K, N), dtype=torch.int8, device='cuda')
         for use_scale in scale_choices():
-            # print(f"scale = {use_scale}")
             use_scalar_scale_a, use_scalar_scale_b = use_scale
             if use_scalar_scale_a:
                 scale_a = torch.rand((1, 1), device='cuda')
@@ -225,14 +208,25 @@ def tune(update_callback, event_queue, output_file):
 
 
 def listener_function(event_queue, num_jobs):
-    bars = [tqdm(total=1000) for i in range(num_jobs)]
-    for item in iter(event_queue.get, None):
-        bars[item].update()
+    bars = {}
+    for event in iter(event_queue.get, None):
+        event_type = event['type']
+        pid = event['pid']
+        if event_type == 'start':
+            bars[pid] = tqdm(total=event['count'])
+        elif event_type == 'update':
+            bars[pid].update()
 
 
 def worker_function(pid, conn, event_queue, output):
-    update_callback = lambda: event_queue.put(pid)
-    tune(update_callback, event_queue, output)
+    update_callback = lambda: event_queue.put({'pid': pid, 'type': 'update'})
+
+    start_callback = lambda count: event_queue.put({
+        'pid': pid,
+        'type': 'start',
+        'count': count
+    })
+    tune(update_callback, start_callback, event_queue, output)
 
 
 def main():
@@ -272,12 +266,6 @@ def main():
 
     event_queue.put(None)
     listener.join()
-    # if is_parent:
-    # print(f"is_parent:jobs={args.jobs}")
-    # else:
-    # print(f"is_child:jobs={args.jobs} job_number={args.job_number}")
-
-    # tune(args.output)
 
 
 if __name__ == '__main__':
