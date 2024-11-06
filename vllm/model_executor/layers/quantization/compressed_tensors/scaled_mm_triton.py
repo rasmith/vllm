@@ -30,81 +30,6 @@ def prepare_matrix_for_triton(x: torch.Tensor):
     return x
 
 
-def get_hip_autotune_config():
-    return [
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 32,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 1,
-                'waves_per_eu': 0
-            },
-            num_warps=4,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 32,
-                'BLOCK_SIZE_N': 32,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 8,
-                'waves_per_eu': 0
-            },
-            num_warps=4,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 16,
-                'GROUP_SIZE_M': 1,
-                'waves_per_eu': 0
-            },
-            num_warps=4,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 256,
-                'BLOCK_SIZE_N': 256,
-                'BLOCK_SIZE_K': 16,
-                'GROUP_SIZE_M': 4,
-                'waves_per_eu': 0
-            },
-            num_warps=8,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 128,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 1,
-                'waves_per_eu': 9
-            },
-            num_warps=8,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 128,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 8,
-                'waves_per_eu': 0
-            },
-            num_warps=4,
-            num_stages=0),
-        triton.Config(
-            {
-                'BLOCK_SIZE_M': 64,
-                'BLOCK_SIZE_N': 64,
-                'BLOCK_SIZE_K': 32,
-                'GROUP_SIZE_M': 1,
-                'waves_per_eu': 0
-            },
-            num_warps=4,
-            num_stages=0),
-    ]
-
-
 def has_scalar(x):
     return x.shape[0] == 1 and x.shape[1] == 1
 
@@ -121,10 +46,6 @@ def get_scale_b_block_size(nargs):
     return nargs['BLOCK_SIZE_N']
 
 
-# @triton.autotune(
-# configs=get_hip_autotune_config(),
-# key=['M', 'N', 'K'],
-# )
 @triton.heuristics({
     "BLOCK_SIZE_SCALE_A": get_scale_a_block_size,
     "BLOCK_SIZE_SCALE_B": get_scale_b_block_size
