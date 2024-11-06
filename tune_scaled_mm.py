@@ -19,19 +19,21 @@ default_config = {
     "mfma": 16,
     "kpack": 1,
 }
+default_values = tuple(default_config.values())
 
 
-def get_pruner(M, N, K, a, b):
+def get_pruner(M, N, K, a_element_size, b_element_size):
     import torch
 
     def pruner(config):
+        return True
         (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, SPLIT_K, GROUP_SIZE_M,
          num_warps, mfma, kpack) = config
         # This is because torch.sum() will have integer overflow.
         if M * N * SPLIT_K >= torch.iinfo(torch.int).max:
             return False
-        num_bytes_per_block_a = BLOCK_SIZE_K * BLOCK_SIZE_M * a.element_size()
-        num_bytes_per_block_b = BLOCK_SIZE_K * BLOCK_SIZE_N * b.element_size()
+        num_bytes_per_block_a = BLOCK_SIZE_K * BLOCK_SIZE_M * a_element_size
+        num_bytes_per_block_b = BLOCK_SIZE_K * BLOCK_SIZE_N * b_element_size
         # Will run out of LDS.
         if num_bytes_per_block_a + num_bytes_per_block_b > 65536:
             return False
@@ -121,7 +123,21 @@ def run_benchmark(update_callback, a, b, scale_a, scale_b, out_dtype, bias,
     return result_data_frames
 
 
-def tune(update_callback, start_callback, event_queue, output_file):
+def compute_total_benchmarks(partition_func, get_pruner, shapes,
+                             config_choices, scale_choices, a_element_size,
+                             b_element_size):
+    count = 0
+    for shape in shapes:
+        M, K, N = shape
+        for use_scale in scale_choices():
+            pruner = get_pruner(M, N, K, a_element_size, b_element_size)
+            work_list = list(filter(pruner, config_choices()))
+            count += len(partition_func(work_list))
+    return count
+
+
+def tune(update_callback, start_callback, partition_func, event_queue,
+         output_file):
     import torch
     import triton
     import triton.language as tl
@@ -142,13 +158,13 @@ def tune(update_callback, start_callback, event_queue, output_file):
         # (15, 5120, 5120),
         # (15, 5120, 7680),
     ]
-    use_scalar_a_choices = [True]  #, False]
-    use_scalar_b_choices = [True]  #, False]
+    use_scalar_a_choices = [True, False]
+    use_scalar_b_choices = [True, False]
     block_m_choices = [16, 32]  #, 64]#, 128, 256]
     block_n_choices = [16, 32]  #, 64]#, 128, 256]
     block_k_choices = [32]  #32, 64]  #, 128, 256]
-    # split_k_choices = [1, 2, 4, 8]
-    split_k_choices = [1, 8]
+    split_k_choices = [1, 2, 4, 8]
+    # split_k_choices = [1, 8]
     # num_warps_choices = [1, 2, 4, 8]
     num_warps_choices = [1, 4, 8]
     # group_m_choices = [1, 4, 8, 16, 32]
@@ -168,11 +184,14 @@ def tune(update_callback, start_callback, event_queue, output_file):
 
     torch.manual_seed(0)
 
-    num_shapes = len(list(shapes))
-    num_scales = len(list(scale_choices()))
-    num_choices = len(list(config_choices()))
+    a_element_size = 1
+    b_element_size = 1
 
-    num_total_benchmarks = num_shapes * num_scales * num_choices
+    num_total_benchmarks = compute_total_benchmarks(partition_func, get_pruner,
+                                                    shapes, config_choices,
+                                                    scale_choices,
+                                                    a_element_size,
+                                                    b_element_size)
     start_callback(num_total_benchmarks)
 
     results = {}
@@ -191,10 +210,11 @@ def tune(update_callback, start_callback, event_queue, output_file):
             else:
                 scale_b = torch.rand((N, 1), device='cuda')
             config_choices_list = list(
-                filter(get_pruner(M, N, K, a, b), config_choices()))
+                filter(get_pruner(M, N, K, a_element_size, b_element_size),
+                       config_choices()))
+            work_list = partition_func(config_choices_list)
             result_configs = run_benchmark(update_callback, a, b, scale_a,
-                                           scale_b, out_dtype, bias,
-                                           config_choices_list)
+                                           scale_b, out_dtype, bias, work_list)
 
             collect_results(result_configs, M, N, K, use_scalar_scale_a,
                             use_scalar_scale_b, results)
@@ -213,12 +233,24 @@ def listener_function(event_queue, num_jobs):
         event_type = event['type']
         pid = event['pid']
         if event_type == 'start':
-            bars[pid] = tqdm(total=event['count'])
+            bars[pid] = tqdm(desc=f"GPU{pid}", total=event['count'])
         elif event_type == 'update':
             bars[pid].update()
 
 
-def worker_function(pid, conn, event_queue, output):
+def partition_list(l, pid, num_jobs):
+    n = len(l)
+    count = (n + num_jobs - 1) // num_jobs
+    start = pid * count
+    end = start + count
+    work_list = l[start:end]
+    if default_values not in work_list:
+        work_list.append(default_values)
+    return work_list
+
+
+def worker_function(pid, num_jobs, parent_connection, event_queue,
+                    output_file):
     update_callback = lambda: event_queue.put({'pid': pid, 'type': 'update'})
 
     start_callback = lambda count: event_queue.put({
@@ -226,19 +258,19 @@ def worker_function(pid, conn, event_queue, output):
         'type': 'start',
         'count': count
     })
-    tune(update_callback, start_callback, event_queue, output)
+    partition_func = lambda l: partition_list(l, pid, num_jobs)
+
+    tune(update_callback, start_callback, partition_func, event_queue,
+         output_file)
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-j', '--jobs', type=int)
-    parser.add_argument('-o', '--output', type=str)
-    parser.add_argument('-n', '--job_number', type=int)
     args = parser.parse_args()
     print(f"#jobs = {args.jobs}")
-    # exit()
+
     num_jobs = min(args.jobs, 8)
-    is_parent = args.jobs is not None and args.job_number is None
 
     mp.set_start_method('spawn')
 
@@ -257,7 +289,8 @@ def main():
         parent_conn, child_conn = mp.Pipe()
         output_file = f"results_{pid}.txt"
         worker = mp.Process(target=worker_function,
-                            args=(pid, child_conn, event_queue, output_file))
+                            args=(pid, num_jobs, child_conn, event_queue,
+                                  output_file))
         worker.start()
         worker_infos.append({'worker': worker, 'connection': parent_conn})
 
