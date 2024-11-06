@@ -26,7 +26,6 @@ def get_pruner(M, N, K, a_element_size, b_element_size):
     import torch
 
     def pruner(config):
-        return True
         (BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K, SPLIT_K, GROUP_SIZE_M,
          num_warps, mfma, kpack) = config
         # This is because torch.sum() will have integer overflow.
@@ -267,10 +266,13 @@ def worker_function(pid, num_jobs, parent_connection, event_queue,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-j', '--jobs', type=int)
+    parser.add_argument('-f', '--first_gpu', type=int)
     args = parser.parse_args()
     print(f"#jobs = {args.jobs}")
 
-    num_jobs = min(args.jobs, 8)
+    first_gpu = 0 if args.first_gpu is None else args.first_gpu
+
+    num_jobs = min(args.jobs, 8 - first_gpu)
 
     mp.set_start_method('spawn')
 
@@ -285,7 +287,7 @@ def main():
 
     worker_infos = []
     for pid in range(num_jobs):
-        os.environ["HIP_VISIBLE_DEVICES"] = f"{pid}"
+        os.environ["HIP_VISIBLE_DEVICES"] = f"{pid+first_gpu}"
         parent_conn, child_conn = mp.Pipe()
         output_file = f"results_{pid}.txt"
         worker = mp.Process(target=worker_function,
