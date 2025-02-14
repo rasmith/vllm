@@ -88,6 +88,8 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    Q_SCALE_CONSTANT: int = 20
+    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
 
 
 def get_default_cache_root():
@@ -578,6 +580,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # Divisor for dynamic query scale factor calculation for FP8 attention
+    "Q_SCALE_CONSTANT":
+    lambda: int(os.getenv("Q_SCALE_CONSTANT", "20")),
+
+    # use quantized q,k,v,softmax(qk^T), attn output during prefill
+    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
+    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
+             ("true", "1")),
 }
 
 # end-env-vars-definition
