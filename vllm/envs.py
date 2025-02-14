@@ -90,6 +90,7 @@ if TYPE_CHECKING:
     VLLM_CUDART_SO_PATH: Optional[str] = None
     Q_SCALE_CONSTANT: int = 20
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_USE_SDPA_ATTENTION: bool = False
 
 
 def get_default_cache_root():
@@ -588,6 +589,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # use quantized q,k,v,softmax(qk^T), attn output during prefill
     "VLLM_USE_ROCM_FP8_FLASH_ATTN":
     lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
+             ("true", "1")),
+
+    # flag to control if vllm should use naive scaled dot-product attention
+    "VLLM_USE_SDPA_ATTENTION":
+    lambda: (os.environ.get("VLLM_USE_SDPA_ATTENTION", "False").lower() in
              ("true", "1")),
 }
 
