@@ -79,6 +79,8 @@ class Attention(nn.Module):
         self.calculate_kv_scales = calculate_kv_scales
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
@@ -145,6 +147,7 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
@@ -162,7 +165,7 @@ class Attention(nn.Module):
         if self.calculate_kv_scales:
             ctx_attn_metadata = get_forward_context().attn_metadata
             if ctx_attn_metadata.enable_kv_scales_calculation:
-                self.calc_kv_scales(key, value)
+                self.calc_kv_scales(query, key, value)
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -201,7 +204,8 @@ class Attention(nn.Module):
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
-    def calc_kv_scales(self, key, value):
+    def calc_kv_scales(self, query, key, value):
+        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         self._k_scale_float = self._k_scale.item()
