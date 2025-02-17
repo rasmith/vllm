@@ -120,7 +120,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
         layer._prob_scale.copy_(prob_scale)
-        layer._input_scale.copy_(input_scale)
         if (q_scale == 1.0
                 or prob_scale == 1.0) and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN:
             logger.warning_once(
@@ -133,4 +132,3 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         del layer.v_scale
         del layer.q_scale
         del layer.prob_scale
-        del layer.input_scale

@@ -81,7 +81,6 @@ class Attention(nn.Module):
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._input_scale = torch.tensor(1.0, dtype=torch.float32)
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
@@ -102,7 +101,6 @@ class Attention(nn.Module):
             # The k/v_scale will then be converted back to native float32
             # values after weight loading.
             self.quant_method = quant_method
-            print(f"layer.py:Attention:self.quant_method={self.quant_method}")
             self.quant_method.create_weights(self)
 
         # During model initialization, the default dtype is set as the model
