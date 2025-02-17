@@ -1059,6 +1059,7 @@ class RowParallelLinear(LinearBase):
         self.reduce_results = reduce_results
 
         assert self.quant_method is not None
+        print(f"self.quant_method = {self.quant_method}")
         self.quant_method.create_weights(
             layer=self,
             input_size_per_partition=self.input_size_per_partition,

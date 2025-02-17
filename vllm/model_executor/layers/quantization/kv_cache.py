@@ -42,12 +42,14 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                                            requires_grad=False)
         layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                               requires_grad=False)
+        layer.input_scale = torch.nn.Parameter(torch.tensor(-1.0),
+                                              requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(
             f"{self.__class__.__name__}.apply should not be called.")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  
         if layer.k_scale > 0.0 and layer.v_scale > 0.0:
             # We prefer to use separate k_scale and v_scale if present
             k_scale = layer.k_scale.to("cpu").tolist()
@@ -106,6 +108,11 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         else:
             prob_scale = 1.0
 
+        if layer.input_scale > 0.0:
+            input_scale = layer.input_scale.to("cpu").tolist()
+        else:
+            input_scale = 1.0
+
         if not isinstance(q_scale, float) or not isinstance(prob_scale, float):
             raise ValueError("Only support per-tensor scaling factor"
                              "for fp8-quantized Q/prob")
@@ -113,6 +120,8 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         # These are used in the final Attention.forward()
         layer._q_scale.copy_(q_scale)
         layer._prob_scale.copy_(prob_scale)
+        layer._input_scale.copy_(input_scale)
+        print(f"input_scale = {input_scale}, prob_scale = {prob_scale}")
         if (q_scale == 1.0
                 or prob_scale == 1.0) and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN:
             logger.warning_once(
@@ -125,3 +134,4 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         del layer.v_scale
         del layer.q_scale
         del layer.prob_scale
+        del layer.input_scale

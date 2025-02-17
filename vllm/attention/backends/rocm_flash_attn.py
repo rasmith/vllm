@@ -552,6 +552,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
+        fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -609,6 +610,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             value = value.view(-1, self.num_kv_heads, self.head_size)
         else:
             assert value is None
+                
+        print(f"*****layer = {layer}")
 
         if self.attn_type != AttentionType.ENCODER and kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
@@ -668,6 +671,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                  key_max_seq_len, seq_lens,
                  causal_mask) = _get_seq_len_block_table_args(
                      prefill_meta, self.attn_type)
+            print(f"---->layer._prob_scale = {layer._prob_scale},"
+                  f"layer._input_scale = {layer._input_scale}, "
+            )
             # Prompt run.
             if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
                 # triton attention
