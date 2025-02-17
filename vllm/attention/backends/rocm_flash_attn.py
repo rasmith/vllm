@@ -610,7 +610,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             value = value.view(-1, self.num_kv_heads, self.head_size)
         else:
             assert value is None
-                
 
         if self.attn_type != AttentionType.ENCODER and kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
