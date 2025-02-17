@@ -211,7 +211,6 @@ class LlamaAttention(nn.Module):
         else:
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
-        print(f"forward:self.o_proj.input_scale =  {self.o_proj.input_scale}")
         return output
 
 
@@ -387,7 +386,6 @@ class LlamaModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        print(f"named_parameters={self.named_parameters}")
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -436,7 +434,6 @@ class LlamaModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                print(f"{name} = {param}")
                 break
             else:
                 # Skip loading extra bias for GPTQ models.

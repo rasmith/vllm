@@ -249,6 +249,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 layer.register_parameter("input_scale", None)
 
     def process_weights_after_loading(self, layer: Module) -> None:
+        print(f"rasmith:layer = {layer}")
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert self.quant_config.activation_scheme == "dynamic"

@@ -831,6 +831,7 @@ class _attention(torch.autograd.Function):
         fp8_scales=None,
     ):
         if fp8_scales is not None:
+            print(f"fp8_scales not None!")
             use_fp8 = True
             (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
             float8 = torch.float8_e4m3fnuz
