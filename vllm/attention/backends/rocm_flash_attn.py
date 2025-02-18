@@ -602,7 +602,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        fp8_out_scale = None
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -689,6 +688,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             fp8_out_scale and layer._q_scale
                             and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
+                    print(f"full_scales = {full_scales}, "
+                          f"fp8_out_scale = {fp8_out_scale},"
+                          f"envs.VLLM_USE_ROCM_FP8_FLASH_ATTN = {envs.VLLM_USE_ROCM_FP8_FLASH_ATTN},"
+                          f"layer._q_scale = {layer._q_scale}"
+                          f"layer._prob_scale = {layer._prob_scale}")
                     out, _ = self.attn_func(
                         query,
                         key,

@@ -85,6 +85,8 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
 
 }  // namespace vllm
 
+#include <type_traits>
+
 void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
                              torch::Tensor const& scale)  // [1]
@@ -95,8 +97,21 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  
+  if (std::is_same<FP8_TYPE, at::Float8_e4m3fnuz>::value) {
+    printf("static_scaled_fp8_quant::FP8_TYPE is Float8_e4m3fnuz\n");
+  }
+  else {
+    printf("static_scaled_fp8_quant::FP8_TYPE is NOT Float8_e4m3fnuz\n");
+  }
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
+        if (std::is_same<scalar_t, at::Float8_e4m3fnuz>::value) {
+          printf("static_scaled_fp8_quant::scalar_t is Float8_e4m3fnuz\n");
+        }
+        else {
+          printf("static_scaled_fp8_quant::scalar_t is NOT Float8_e4m3fnuz\n");
+        }
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
             out.data_ptr<FP8_TYPE>(), input.data_ptr<scalar_t>(),
             scale.data_ptr<float>(), num_elems);

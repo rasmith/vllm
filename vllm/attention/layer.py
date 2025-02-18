@@ -160,6 +160,7 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        print(f"ROCM FLASH ATTN!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
         # directly, use `self.kv_cache` and
         # `get_forward_context().attn_metadata` instead.
@@ -168,6 +169,7 @@ class Attention(nn.Module):
             if ctx_attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
         if self.use_output:
+            print(f"----->use_output")
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
             # Reshape the query, key, and value tensors.
@@ -183,7 +185,7 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                if current_platform.is_rocm and not is_navi():
+                if current_platform.is_rocm() and not is_navi():
                     self.impl.forward(self,
                                       query,
                                       key,
@@ -199,28 +201,31 @@ class Attention(nn.Module):
                                       value,
                                       self_kv_cache,
                                       ctx_attn_metadata,
-                                      output=output,
-                                      fp8_out_scale=fp8_out_scale)
+                                      output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name,
+                    fp8_out_scale = fp8_out_scale)
             return output.view(-1, hidden_size)
         else:
+            print(f"NOT USE OUTPUT---------------------------")
             if self.use_direct_call:
                 forward_context = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+                print(f"DIRECT CALL-----------------------------")
                 if current_platform.is_rocm and not is_navi():
                     return self.impl.forward(self, query, key, value,
                                              self_kv_cache, ctx_attn_metadata,
                                              fp8_out_scale=fp8_out_scale)
                 else:
                     return self.impl.forward(self, query, key, value,
-                                             self_kv_cache, ctx_attn_metadata,
-                                             fp8_out_scale=fp8_out_scale)
+                                             self_kv_cache, ctx_attn_metadata)
             else:
+                print(f"********UNIFIED ATTENTION!!!!!!!")
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                    query, key, value, self.layer_name,
+                    fp8_out_scale = fp8_out_scale)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
@@ -321,12 +326,18 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+
+    if current_platform.is_rocm() and not is_navi():
+        return self.impl.forward(self, query, key, value, kv_cache,
+                                 attn_metadata, fp8_out_scale = fp8_out_scale)
+    else:
+        return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
 
 def unified_attention_fake(
@@ -334,6 +345,7 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -353,18 +365,30 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(self,
-                      query,
-                      key,
-                      value,
-                      kv_cache,
-                      attn_metadata,
-                      output=output)
+
+    if current_platform.is_rocm() and not is_navi():
+        self.impl.forward(self,
+                          query,
+                          key,
+                          value,
+                          kv_cache,
+                          attn_metadata,
+                          output=output,
+                          fp8_out_scale=fp8_out_scale)
+    else:
+        self.impl.forward(self,
+                          query,
+                          key,
+                          value,
+                          kv_cache,
+                          attn_metadata,
+                          output=output)
 
 
 def unified_attention_with_output_fake(
@@ -373,6 +397,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     return
 
