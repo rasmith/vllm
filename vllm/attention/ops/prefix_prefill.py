@@ -733,6 +733,8 @@ if triton.__version__ >= "2.1.0":
         # implementation
         IN_PRECISION = 'ieee' if IS_TURING and q_dtype_is_f32 else None
 
+        from vllm.utils import get_fp8_dtype
+
         # Conversion of FP8 Tensor from uint8 storage to
         # appropriate torch.dtype for interpretation by Triton
         if "fp8" in kv_cache_dtype:
@@ -740,7 +742,7 @@ if triton.__version__ >= "2.1.0":
             assert (v_cache.dtype == torch.uint8)
 
             if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-                target_dtype = torch.float8_e4m3fn
+                target_dtype = get_fp8_dtype()
             elif kv_cache_dtype == "fp8_e5m2":
                 target_dtype = torch.float8_e5m2
             else:

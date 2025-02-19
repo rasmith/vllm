@@ -11,6 +11,9 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils import get_fp8_dtype
+
+FP8_DTYPE = get_fp8_dtype()
 
 logger = init_logger(__name__)
 
@@ -849,7 +852,7 @@ def scaled_fp8_quant(
             if current_platform.is_rocm() else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
-    output = torch.empty(shape, device=input.device, dtype=out_dtype)
+    output = torch.empty(shape, device=input.device, dtype=FP8_DTYPE)
 
     if scale is None:
         if use_per_token_if_dynamic:

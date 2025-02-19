@@ -4,8 +4,8 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.quant_utils import (FP8_DTYPE,
-                                       ref_dynamic_per_tensor_fp8_quant,
+from vllm.utils import get_fp8_dtype()
+from tests.kernels.quant_utils import (ref_dynamic_per_tensor_fp8_quant,
                                        ref_dynamic_per_token_quant)
 from tests.kernels.utils import opcheck
 from vllm.platforms import current_platform
@@ -17,6 +17,8 @@ HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SCALE_UBS = [True, False]
 SEEDS = [0]
+
+FP8_DTYPE = get_fp8_dtype()
 
 
 def opcheck_fp8_quant(output,

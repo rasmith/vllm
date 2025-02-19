@@ -2,7 +2,9 @@
 
 import pytest
 import torch
-from compressed_tensors.quantization import FP8_DTYPE
+from vllm.utils import get_fp8_dtype()
+
+FP8_DTYPE = get_fp8_dtype()
 
 import vllm.envs as envs
 from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,

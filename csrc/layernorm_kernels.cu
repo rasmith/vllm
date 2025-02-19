@@ -10,6 +10,12 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+#ifdef USE_ROCM
+  #include "quantization/fp8/amd/quant_utils.cuh"
+#else
+  #include "quantization/fp8/nvidia/quant_utils.cuh"
+#endif
+
 namespace vllm {
 
 // TODO(woosuk): Further optimize this kernel.
@@ -47,6 +53,12 @@ __global__ void rms_norm_kernel(
    Additional optimizations we can make in this case are
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
+
+template <>
+struct Vec<c10::Float8_e4m3fnuz, 8> {
+    using Type = uint2;
+};
+
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(

@@ -5,7 +5,6 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
 import torch
 import torch._inductor.pattern_matcher as pm
 # TODO(luka) use vllm.utils once #10836 landed
-from compressed_tensors.quantization import FP8_DTYPE
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
@@ -17,6 +16,10 @@ from vllm.logger import init_logger
 from .fx_utils import find_getitem_maybe
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
+
+from vllm.utils import get_fp8_dtype
+
+FP8_DTYPE = get_fp8_dtype()
 
 logger = init_logger(__name__)
 

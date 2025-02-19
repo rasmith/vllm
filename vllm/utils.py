@@ -168,6 +168,11 @@ _K = TypeVar("_K", bound=Hashable)
 _V = TypeVar("_V")
 
 
+def get_fp8_dtype():
+    from vllm.platforms import current_platform
+    dtype = (torch.float8_e4m3fnuz if current_platform.is_rocm() else torch.float8_e4m3fn)
+    return dtype
+
 class _Sentinel:
     ...
 
