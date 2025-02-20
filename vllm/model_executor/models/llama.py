@@ -56,6 +56,8 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
 from vllm.utils import is_navi
 from vllm.platforms import current_platform
 
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
 
 class LlamaMLP(nn.Module):
 
@@ -225,6 +227,11 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.use_fp8 = (isinstance(quant_config, Fp8Config) or
+                        (isinstance(quant_config, QuarkConfig)
+                         and quant_config.is_fp8_w8a8())
+                        if current_platform.is_rocm() and not is_navi() else
+                        False)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -291,8 +298,9 @@ class LlamaDecoderLayer(nn.Module):
                                        attn_metadata=attn_metadata)
 
         # Fully Connected
+        scale = None if not self.use_fp8 else self.mlp.gate_up_proj.input_scale
         hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+            hidden_states, residual, scale)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

@@ -494,6 +494,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         self.use_naive_attn = envs.VLLM_USE_SDPA_ATTENTION  # Default False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
+        self.use_triton_flash_attn = False
         if self.use_triton_flash_attn:
             if logits_soft_cap is not None:
                 raise ValueError(
