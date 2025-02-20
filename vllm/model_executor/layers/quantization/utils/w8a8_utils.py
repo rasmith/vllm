@@ -117,6 +117,7 @@ def apply_fp8_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
+    out_dtype: Optional[torch.dtype] = None,
     input_scale: Optional[torch.Tensor] = None,
     input_scale_ub: Optional[torch.Tensor] = None,
     bias: Optional[torch.Tensor] = None,
@@ -130,6 +131,9 @@ def apply_fp8_linear(
     # View input as 2D matrix for fp8 methods
     input_2d = input.view(-1, input.shape[-1])
     output_shape = [*input.shape[:-1], weight.shape[1]]
+
+    if output_shape is None:
+        out_dtype = input.dtype
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
@@ -170,7 +174,7 @@ def apply_fp8_linear(
             # Fused GEMM_DQ
             output = torch._scaled_mm(qinput,
                                       weight,
-                                      out_dtype=input.dtype,
+                                      out_dtype=out_dtype,
                                       scale_a=x_scale,
                                       scale_b=weight_scale,
                                       bias=bias)

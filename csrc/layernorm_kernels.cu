@@ -166,6 +166,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   });
 }
 
+
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                       \
   VLLM_DISPATCH_FLOATING_TYPES(                                                \
       input.scalar_type(), "fused_add_rms_norm_kernel", [&] {                  \
