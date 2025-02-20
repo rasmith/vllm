@@ -54,10 +54,6 @@ __global__ void rms_norm_kernel(
    packed and vectorized operations, which help with the
    memory latency bottleneck. */
 
-template <>
-struct Vec<c10::Float8_e4m3fnuz, 8> {
-    using Type = uint2;
-};
 
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>

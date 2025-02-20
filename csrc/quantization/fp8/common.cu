@@ -85,7 +85,6 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
 
 }  // namespace vllm
 
-#include <type_traits>
 
 void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
@@ -97,7 +96,6 @@ void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
   dim3 block(1024);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  
   VLLM_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "scaled_fp8_quant_kernel", [&] {
         vllm::scaled_fp8_quant_kernel<scalar_t><<<grid, block, 0, stream>>>(
