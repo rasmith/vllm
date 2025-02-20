@@ -85,7 +85,6 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel(
 
 }  // namespace vllm
 
-
 void static_scaled_fp8_quant(torch::Tensor& out,          // [..., d]
                              torch::Tensor const& input,  // [..., d]
                              torch::Tensor const& scale)  // [1]
