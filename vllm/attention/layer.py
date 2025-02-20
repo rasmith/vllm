@@ -160,7 +160,6 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        print(f"ROCM FLASH ATTN!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
         # directly, use `self.kv_cache` and
         # `get_forward_context().attn_metadata` instead.
@@ -169,7 +168,6 @@ class Attention(nn.Module):
             if ctx_attn_metadata.enable_kv_scales_calculation:
                 self.calc_kv_scales(query, key, value)
         if self.use_output:
-            print(f"----->use_output")
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
             # Reshape the query, key, and value tensors.
@@ -208,12 +206,10 @@ class Attention(nn.Module):
                     fp8_out_scale = fp8_out_scale)
             return output.view(-1, hidden_size)
         else:
-            print(f"NOT USE OUTPUT---------------------------")
             if self.use_direct_call:
                 forward_context = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                print(f"DIRECT CALL-----------------------------")
                 if current_platform.is_rocm and not is_navi():
                     return self.impl.forward(self, query, key, value,
                                              self_kv_cache, ctx_attn_metadata,
@@ -222,7 +218,6 @@ class Attention(nn.Module):
                     return self.impl.forward(self, query, key, value,
                                              self_kv_cache, ctx_attn_metadata)
             else:
-                print(f"********UNIFIED ATTENTION!!!!!!!")
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name,
                     fp8_out_scale = fp8_out_scale)
