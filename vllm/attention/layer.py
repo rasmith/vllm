@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (direct_register_custom_op, is_navi)
 
 
 class Attention(nn.Module):
@@ -79,6 +79,8 @@ class Attention(nn.Module):
         self.calculate_kv_scales = calculate_kv_scales
         self._k_scale = torch.tensor(1.0, dtype=torch.float32)
         self._v_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
@@ -145,6 +147,7 @@ class Attention(nn.Module):
             ).parallel_config.pipeline_parallel_size)
         ]
 
+        self.q_range = torch.tensor(envs.Q_SCALE_CONSTANT, dtype=torch.float32)
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
@@ -155,6 +158,7 @@ class Attention(nn.Module):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
         # directly, use `self.kv_cache` and
@@ -162,7 +166,7 @@ class Attention(nn.Module):
         if self.calculate_kv_scales:
             ctx_attn_metadata = get_forward_context().attn_metadata
             if ctx_attn_metadata.enable_kv_scales_calculation:
-                self.calc_kv_scales(key, value)
+                self.calc_kv_scales(query, key, value)
         if self.use_output:
             output = torch.empty_like(query)
             hidden_size = query.size(-1)
@@ -179,13 +183,24 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  ctx_attn_metadata,
-                                  output=output)
+                if current_platform.is_rocm and not is_navi():
+                    self.impl.forward(self,
+                                      query,
+                                      key,
+                                      value,
+                                      self_kv_cache,
+                                      ctx_attn_metadata,
+                                      output=output,
+                                      fp8_out_scale=fp8_out_scale)
+                else:
+                    self.impl.forward(self,
+                                      query,
+                                      key,
+                                      value,
+                                      self_kv_cache,
+                                      ctx_attn_metadata,
+                                      output=output,
+                                      fp8_out_scale=fp8_out_scale)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name)
@@ -195,13 +210,20 @@ class Attention(nn.Module):
                 forward_context = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, ctx_attn_metadata)
+                if current_platform.is_rocm and not is_navi():
+                    return self.impl.forward(self, query, key, value,
+                                             self_kv_cache, ctx_attn_metadata,
+                                             fp8_out_scale=fp8_out_scale)
+                else:
+                    return self.impl.forward(self, query, key, value,
+                                             self_kv_cache, ctx_attn_metadata,
+                                             fp8_out_scale=fp8_out_scale)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name)
 
-    def calc_kv_scales(self, key, value):
+    def calc_kv_scales(self, query, key, value):
+        self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
         self._k_scale_float = self._k_scale.item()
