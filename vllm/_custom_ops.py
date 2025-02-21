@@ -155,6 +155,9 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
+    print(f"input.dtype = {input.dtype},"
+          f"residual.dtype = {residual.dtype},"
+          f"weight.dtype = {weight.dtype}")
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
