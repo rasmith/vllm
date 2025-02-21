@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
+    VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
     Q_SCALE_CONSTANT: int = 20
     VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
     VLLM_USE_SDPA_ATTENTION: bool = False
@@ -588,6 +589,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # Contiguous cache fetching to avoid using costly gather operation on
+    # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
+    # contiguous cache fetch will be used.
+    "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
+    lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
+    ("1", "true"),
 
     # Divisor for dynamic query scale factor calculation for FP8 attention
     "Q_SCALE_CONSTANT":
