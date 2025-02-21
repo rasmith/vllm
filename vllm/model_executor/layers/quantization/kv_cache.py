@@ -43,13 +43,13 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         layer.prob_scale = torch.nn.Parameter(torch.tensor(-1.0),
                                               requires_grad=False)
         layer.input_scale = torch.nn.Parameter(torch.tensor(-1.0),
-                                              requires_grad=False)
+                                               requires_grad=False)
 
     def apply(self, layer: torch.nn.Module) -> torch.Tensor:
         raise RuntimeError(
             f"{self.__class__.__name__}.apply should not be called.")
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:  
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if layer.k_scale > 0.0 and layer.v_scale > 0.0:
             # We prefer to use separate k_scale and v_scale if present
             k_scale = layer.k_scale.to("cpu").tolist()

@@ -211,12 +211,20 @@ class Attention(nn.Module):
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 if current_platform.is_rocm and not is_navi():
-                    return self.impl.forward(self, query, key, value,
-                                             self_kv_cache, ctx_attn_metadata,
+                    return self.impl.forward(self,
+                                             query,
+                                             key,
+                                             value,
+                                             self_kv_cache,
+                                             ctx_attn_metadata,
                                              fp8_out_scale=fp8_out_scale)
                 else:
-                    return self.impl.forward(self, query, key, value,
-                                             self_kv_cache, ctx_attn_metadata,
+                    return self.impl.forward(self,
+                                             query,
+                                             key,
+                                             value,
+                                             self_kv_cache,
+                                             ctx_attn_metadata,
                                              fp8_out_scale=fp8_out_scale)
             else:
                 return torch.ops.vllm.unified_attention(

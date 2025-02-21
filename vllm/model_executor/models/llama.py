@@ -206,8 +206,12 @@ class LlamaAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         if current_platform.is_rocm() and not is_navi():
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
-                                    fp8_out_scale = self.o_proj.input_scale)
+            attn_output = self.attn(q,
+                                    k,
+                                    v,
+                                    kv_cache,
+                                    attn_metadata,
+                                    fp8_out_scale=self.o_proj.input_scale)
         else:
             attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
