@@ -608,6 +608,7 @@ def attn_fwd(
     # have native e^x support in HW.
     qk_scale = sm_scale * 1.44269504089
     # Q is loaded once at the beginning and shared by all N blocks.
+# aaaaaaaaaaaaaaaaa begin
     q = load_fn(Q_block_ptr, True, padded_head, "zero")
     if not USE_FP8:
         q = (q * qk_scale).to(Q_block_ptr.type.element_ty)
@@ -615,7 +616,7 @@ def attn_fwd(
     else:
         qk_scale *= q_scale * k_scale
         acc_scale = p_scale * v_scale
-
+# aaaaaaaaaaaaaaaaa end
     # Here we compute how many full and masked blocks we have.
     padded_block_k = n_extra_tokens != 0
     is_modulo_mn = not padded_block_k and (seqlen_q % BLOCK_M == 0)
@@ -737,7 +738,7 @@ def attn_fwd(
     start_m_idx = start_m * BLOCK_M
     causal_start_idx = seqlen_q - seqlen_k
     if USE_FP8:
-        acc *= o_descale
+        acc *= o_descale # 1/p_scale * 1/v_scale
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     acc = acc.to(Out.type.element_ty)
     if IS_CAUSAL:  # noqa: SIM102
