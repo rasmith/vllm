@@ -1191,7 +1191,9 @@ def triton_attention(
     causal=False,
     sm_scale=1.0,
     bias=None,
+    full_scales = None,
 ) -> torch.Tensor:
+    print(f"triton_attention:TRITON ATTENTION")
     num_seqs, num_heads, head_size = q.shape
     attn_metadata = MetaData(sm_scale=sm_scale)
     attn_metadata.max_seqlens_q = max_seqlens_q
@@ -1199,4 +1201,7 @@ def triton_attention(
     attn_metadata.causal = causal
     attn_metadata.bias = bias
     attn_metadata.set_varlen_params(cu_seqlens_q, cu_seqlens_k)
+    print(f"triton_attention:q.dtype={q.dtype}")
+    if full_scales is not None:
+        print(f"full_scales[0].dtype={full_scales[0].dtype}")
     return triton_attention_rocm(q, k, v, o, attn_metadata)

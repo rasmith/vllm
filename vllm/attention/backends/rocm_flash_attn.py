@@ -30,6 +30,8 @@ _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
+    accept_output_buffer: bool = True
+
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASH"
@@ -688,6 +690,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             fp8_out_scale and layer._q_scale
                             and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
+                    print(f"rocm_flash_attn:fp8_out_scale = {fp8_out_scale}")
+                    print(f"rocm_flash_attn:full_scales={full_scales}")
                     out, _ = self.attn_func(
                         query,
                         key,
