@@ -203,7 +203,7 @@ class Attention(nn.Module):
                                       fp8_out_scale=fp8_out_scale)
             else:
                 torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name)
+                    query, key, value, output, self.layer_name, fp8_out_scale)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -220,7 +220,7 @@ class Attention(nn.Module):
                                              fp8_out_scale=fp8_out_scale)
             else:
                 return torch.ops.vllm.unified_attention(
-                    query, key, value, self.layer_name)
+                    query, key, value, self.layer_name, fp8_out_scale)
 
     def calc_kv_scales(self, query, key, value):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
@@ -321,12 +321,14 @@ def unified_attention(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata,
+            fp8_out_scale=fp8_out_scale)
 
 
 def unified_attention_fake(
@@ -334,6 +336,7 @@ def unified_attention_fake(
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
 
@@ -353,6 +356,7 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
@@ -364,7 +368,8 @@ def unified_attention_with_output(
                       value,
                       kv_cache,
                       attn_metadata,
-                      output=output)
+                      output=output,
+                      fp8_out_scale=fp8_out_scale)
 
 
 def unified_attention_with_output_fake(
@@ -373,6 +378,7 @@ def unified_attention_with_output_fake(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    fp8_out_scale: Optional[torch.Tensor],
 ) -> None:
     return
 

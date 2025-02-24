@@ -830,6 +830,7 @@ class _attention(torch.autograd.Function):
         bias=None,
         fp8_scales=None,
     ):
+        print(f"_attention.forward:fp8_scales={fp8_scales}")
         if fp8_scales is not None:
             use_fp8 = True
             (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales

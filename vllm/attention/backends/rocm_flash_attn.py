@@ -688,6 +688,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             fp8_out_scale and layer._q_scale
                             and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
+                    print(f"ROCmFlashAttentionBackend.forward:full_scales={full_scales}")
                     out, _ = self.attn_func(
                         query,
                         key,
