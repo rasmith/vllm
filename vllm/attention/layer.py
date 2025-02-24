@@ -160,7 +160,6 @@ class Attention(nn.Module):
         attn_metadata: AttentionMetadata,
         fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        print(f"Attention.forward:self.use_output={self.use_output}")
         # NOTE: please avoid accessing `kv_cache` and `attn_metadata` arguments
         # directly, use `self.kv_cache` and
         # `get_forward_context().attn_metadata` instead.
@@ -185,7 +184,6 @@ class Attention(nn.Module):
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
                 if current_platform.is_rocm() and not is_navi():
-                    print(f"Attention.forward:fp8_out_scale = {fp8_out_scale}")
                     self.impl.forward(self,
                                       query,
                                       key,
@@ -324,7 +322,6 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    print(f"unified_attention")
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     self = forward_context.attn_layers[layer_name]
