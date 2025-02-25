@@ -1538,7 +1538,7 @@ class ClassRegistry(UserDict[Type[T], _V]):
         return any(cls in self.data for cls in key.mro())
 
 
-@lru_cache(maxsize=None)
+@cache
 def is_navi() -> bool:
     from vllm.platforms import current_platform
     if not current_platform.is_rocm() or not torch.cuda.is_available():

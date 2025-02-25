@@ -804,7 +804,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 if num_prefill_tokens > 0:
                     out = output[num_prefill_tokens:]
                 else:
-                    if fp8_out_scale is not None:
+                    # NOTE: Can't run in upstream for now, produces garbage.
+                    if False:
                         out = torch.empty_like(output,
                                                dtype=torch.float8_e4m3fnuz)
                         cpa_fp8_out = True
