@@ -58,6 +58,7 @@ from vllm.platforms import current_platform
 
 
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
 class LlamaMLP(nn.Module):
 
