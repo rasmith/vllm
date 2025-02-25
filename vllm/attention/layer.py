@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import _Backend, current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (direct_register_custom_op, is_navi)
 
 
 class Attention(nn.Module):
@@ -182,14 +182,23 @@ class Attention(nn.Module):
                 forward_context: ForwardContext = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                self.impl.forward(self,
-                                  query,
-                                  key,
-                                  value,
-                                  self_kv_cache,
-                                  ctx_attn_metadata,
-                                  output=output,
-                                  fp8_out_scale = fp8_out_scale)
+                if current_platform.is_rocm() and not is_navi():
+                    self.impl.forward(self,
+                                      query,
+                                      key,
+                                      value,
+                                      self_kv_cache,
+                                      ctx_attn_metadata,
+                                      output=output,
+                                      fp8_out_scale = fp8_out_scale)
+                else:
+                    self.impl.forward(self,
+                                      query,
+                                      key,
+                                      value,
+                                      self_kv_cache,
+                                      ctx_attn_metadata,
+                                      output=output)
             else:
                 torch.ops.vllm.unified_attention_with_output(
                     query, key, value, output, self.layer_name,
@@ -200,9 +209,13 @@ class Attention(nn.Module):
                 forward_context = get_forward_context()
                 ctx_attn_metadata = forward_context.attn_metadata
                 self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-                return self.impl.forward(self, query, key, value,
-                                         self_kv_cache, ctx_attn_metadata,
-                                         fp8_out_scale = fp8_out_scale)
+                if current_platform.is_rocm() and not is_navi():
+                    return self.impl.forward(self, query, key, value,
+                                             self_kv_cache, ctx_attn_metadata,
+                                             fp8_out_scale = fp8_out_scale)
+                else:
+                    return self.impl.forward(self, query, key, value,
+                                             self_kv_cache, ctx_attn_metadata)
             else:
                 return torch.ops.vllm.unified_attention(
                     query, key, value, self.layer_name,
