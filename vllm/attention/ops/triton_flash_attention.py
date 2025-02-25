@@ -25,8 +25,6 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.utils import is_navi
-
 torch_dtype: tl.constexpr = torch.float16
 
 
@@ -383,15 +381,13 @@ def get_rdna_autotune_configs():
 
 
 def get_autotune_configs():
-    if is_navi():
-        return get_rdna_autotune_configs()
-    else:
-        return get_cdna_autotune_configs()
+    return get_cdna_autotune_configs()
 
 
 autotune_configs, autotune_keys = get_autotune_configs()
 
 float8_info = torch.finfo(torch.float8_e4m3fnuz)
+
 
 @triton.autotune(
     configs=autotune_configs,
@@ -745,8 +741,8 @@ def attn_fwd(
                                         causal_start_idx,
                                         dtype=tl.int32)
             mask_m_offsets = start_m_idx + tl.arange(0, BLOCK_M)
-            out_ptrs_mask = (mask_m_offsets[:, None] >=
-                             out_mask_boundary[None, :])
+            out_ptrs_mask = (mask_m_offsets[:, None]
+                             >= out_mask_boundary[None, :])
             z = tl.zeros((1, ), tl.float32)
             acc = tl.where(out_ptrs_mask, acc, z.to(acc.type.element_ty))
     # write back LSE
@@ -830,7 +826,7 @@ class _attention(torch.autograd.Function):
         bias=None,
         fp8_scales=None,
     ):
-        print(f"_attention.forward:fp8_scales={fp8_scales}")
+        print(f"_attention.forward:fp8_scales = {fp8_scales}")
         if fp8_scales is not None:
             use_fp8 = True
             (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
@@ -838,7 +834,6 @@ class _attention(torch.autograd.Function):
 
             def check_and_convert(t, scale):
                 if t.dtype != float8:
-                    finfo = torch.finfo(float8)
                     descale = 1.0 / scale
                     ts = (t * descale).clamp(min=float8_info.min,
                                              max=float8_info.max)
@@ -918,8 +913,8 @@ class _attention(torch.autograd.Function):
         p_descale = 1.0 / p_scale
         o_descale = 1.0 / o_scale
 
-        arg_max_seqlens_q = 0 if is_navi() else max_seqlens_q
-        arg_max_seqlens_k = 0 if is_navi() else max_seqlens_k
+        arg_max_seqlens_q = max_seqlens_q
+        arg_max_seqlens_k = max_seqlens_k
 
         attn_fwd[grid](
             q,

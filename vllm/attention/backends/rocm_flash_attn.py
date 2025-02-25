@@ -22,14 +22,13 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_PARTITION_SIZE_ROCM = 256
+_PARTITION_SIZE_ROCM = 512
 _GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
 _ON_NAVI = "gfx1" in _GPU_ARCH
 _ON_MI250_MI300 = any(arch in _GPU_ARCH for arch in ["gfx90a", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
-
 
     @staticmethod
     def get_name() -> str:
@@ -491,7 +490,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
 
-        self.use_naive_attn = envs.VLLM_USE_SDPA_ATTENTION  # Default False
+        self.use_naive_attn = False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
@@ -688,7 +687,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             fp8_out_scale and layer._q_scale
                             and layer._prob_scale
                             and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
-                    print(f"ROCmFlashAttentionBackend.forward:full_scales={full_scales}")
                     out, _ = self.attn_func(
                         query,
                         key,
@@ -806,7 +804,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 if num_prefill_tokens > 0:
                     out = output[num_prefill_tokens:]
                 else:
-                    if fp8_out_scale is not None:
+                    if False:
                         out = torch.empty_like(output,
                                                dtype=torch.float8_e4m3fnuz)
                         cpa_fp8_out = True
@@ -872,7 +870,6 @@ def _sdpa_attention(
     num_heads: int,
     head_size: int,
     scale: float,
-    is_causal: bool,
     attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
@@ -890,7 +887,7 @@ def _sdpa_attention(
                 key[:, start:end, :],
                 value[:, start:end, :],
                 dropout_p=0.0,
-                is_causal=is_causal,
+                is_causal=attn_masks is None,
                 attn_mask=attn_masks[i] if attn_masks else None,
                 scale=scale).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out
@@ -907,5 +904,4 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
             and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
-            and (gqa_ratio >= 1 and gqa_ratio <= 16)
-            and max_seq_len <= 128 * 1024)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

@@ -55,8 +55,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-from vllm.utils import is_navi
-from vllm.platforms import current_platform
 
 
 class LlamaMLP(nn.Module):
@@ -173,14 +171,6 @@ class LlamaAttention(nn.Module):
             is_neox_style=is_neox_style,
         )
 
-        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
-        use_fp8 = isinstance(
-            quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
-                                         and quant_config.is_fp8_w8a8())
-        self.attn_fp8_out = current_platform.is_rocm() \
-                        and not is_navi() \
-                        and use_fp8
-
         if hasattr(config, "interleaved_sliding_window"):
             interleaved_sliding_window = config.interleaved_sliding_window
             if isinstance(interleaved_sliding_window, int):
@@ -215,12 +205,8 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        if current_platform.is_rocm() and not is_navi():
-            attn_output = self.attn(
-                q, k, v, kv_cache, attn_metadata,
-                self.o_proj.input_scale if self.attn_fp8_out else None)
-        else:
-            attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata,
+                                fp8_out_scale =self.o_proj.input_scale)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -441,10 +427,6 @@ class LlamaModel(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     continue
-
-                if name not in params_dict:
-                    print(f"name = {name}")
-                    print(f"params_dict = {params_dict}")
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
