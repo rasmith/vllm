@@ -40,7 +40,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
->>>>>>> 6b2147f47 (Support FP8 FA from Quark format (#388))
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -85,14 +84,6 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-<<<<<<< HEAD
-=======
-        self.use_fp8 = (isinstance(quant_config, Fp8Config) or
-                        (isinstance(quant_config, QuarkConfig)
-                         and quant_config.is_fp8_w8a8())
-                        if current_platform.is_rocm() and not is_navi() else
-                        False)
->>>>>>> 6b2147f47 (Support FP8 FA from Quark format (#388))
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -202,18 +193,6 @@ class LlamaAttention(nn.Module):
         else:
             sliding_window = None
 
-<<<<<<< HEAD
-=======
-        # For CUDA devices and Navi4x, attn_fp8 will be set to false.
-        use_fp8 = isinstance(
-            quant_config, Fp8Config) or (isinstance(quant_config, QuarkConfig)
-                                         and quant_config.is_fp8_w8a8())
-        self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
-                        and current_platform.is_rocm() \
-                        and not is_navi() \
-                        and use_fp8
-
->>>>>>> 6b2147f47 (Support FP8 FA from Quark format (#388))
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -256,14 +235,6 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-<<<<<<< HEAD
-=======
-        self.use_fp8 = (isinstance(quant_config, Fp8Config) or
-                        (isinstance(quant_config, QuarkConfig)
-                         and quant_config.is_fp8_w8a8())
-                        if current_platform.is_rocm() and not is_navi() else
-                        False)
->>>>>>> 6b2147f47 (Support FP8 FA from Quark format (#388))
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
