@@ -443,6 +443,10 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                if name not in params_dict:
+                    print(f"name = {name}")
+                    print(f"params_dict = {params_dict}")
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
