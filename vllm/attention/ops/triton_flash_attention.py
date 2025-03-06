@@ -573,11 +573,11 @@ autotune_configs, autotune_keys = get_autotune_configs()
 float8_info = torch.finfo(torch.float8_e4m3fnuz)
 
 
-# @triton.autotune(
-# configs=autotune_configs,
-# key=autotune_keys,
-# use_cuda_graph=True,
-# )
+@triton.autotune(
+configs=autotune_configs,
+key=autotune_keys,
+use_cuda_graph=True,
+)
 @triton.jit
 def attn_fwd(
     Q,
@@ -1238,11 +1238,7 @@ class _attention(torch.autograd.Function):
                        PERSISTENT_DYNAMIC=metadata.persistent == "dynamic",
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
-                       B=batch,
-                       BLOCK_M=32,
-                       BLOCK_N=32,
-                       PRE_LOAD_V=False,
-                       GRID_CU_MULTIP=2)
+                       B=batch)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
