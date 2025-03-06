@@ -24,10 +24,11 @@ Currently only the forward kernel is supported, and contains these features:
 import torch
 import triton
 import triton.language as tl
+from vllm.platforms import current_platform
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
-QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
+QKV_DTYPE_TORCH = torch.float8_e4m3fnuz if current_platform.is_rocm() else torch.float8_e4m3fn
 
 class MetaData:
     cu_seqlens_q = None
@@ -1111,11 +1112,10 @@ class _attention(torch.autograd.Function):
             assert (metadata.bias.numel() < 2**31)
 
         if o is None:
-            o = torch.empty_like(q, dtype=v.dtype)
-            # if not metadata.eight_bit:
-                # o = torch.empty_like(q, dtype=v.dtype)
-            # else:
-                # o = torch.empty_like(q, dtype=torch.float16)
+            if not metadata.eight_bit:
+                o = torch.empty_like(q, dtype=v.dtype)
+            else:
+                o = torch.empty_like(q, dtype=QKV_DTYPE_TORCH)
 
 
         print(f"_attention.forward:q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}")
