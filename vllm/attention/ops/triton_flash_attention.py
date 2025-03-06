@@ -644,8 +644,8 @@ def attn_fwd(
     IS_FP8: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    # EIGHT_BIT_DTYPE: tl.constexpr = tl.float8e4b8,
-    EIGHT_BIT_DTYPE: tl.constexpr = tl.float16,
+    EIGHT_BIT_DTYPE: tl.constexpr = tl.float8e4b8,
+    # EIGHT_BIT_DTYPE: tl.constexpr = tl.float16,
 ):
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
@@ -1291,9 +1291,6 @@ def triton_attention(
     print(f"triton_attention:fp8_scales = {fp8_scales}")
     if fp8_scales is not None:
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
-        # q = check_and_convert(q, q_scale)
-        # k = check_and_convert(k, k_scale)
-        # v = check_and_convert(v, v_scale)
         q *= q_scale
         k *= k_scale
         v *= v_scale
