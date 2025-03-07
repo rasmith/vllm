@@ -1337,7 +1337,7 @@ def triton_attention(
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
         if q.dtype != eight_bit_dtype:
             q = quantize_fp8(q, q_scale, eight_bit_dtype)
-            k = quantize_fp8(k, k_scal, eight_bit_dtypee)
+            k = quantize_fp8(k, k_scale, eight_bit_dtype)
             v = quantize_fp8(v, v_scale, eight_bit_dtype)
 
         q_scale = torch.full((q.shape[1], 1, 1),

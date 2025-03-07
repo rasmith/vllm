@@ -356,6 +356,7 @@ def test_op_persistent_fwd(Z,
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
+    (1, 1, 1, 1, 64),
     (4, 48, 1, 1, 64),
     (4, 48, 1, 1, 128),
     (4, 48, 3, 3, 128),
@@ -364,13 +365,13 @@ def test_op_persistent_fwd(Z,
 @pytest.mark.parametrize('causal', [True, False])
 @pytest.mark.parametrize('layout', ['bhsd'])
 def test_op_fwd_fp8(Z,
-                     H,
-                     N_CTX_Q,
-                     N_CTX_K,
-                     D_HEAD,
-                     causal,
-                     layout,
-                     dtype=torch.float16):
+                    H,
+                    N_CTX_Q,
+                    N_CTX_K,
+                    D_HEAD,
+                    causal,
+                    layout,
+                    dtype=torch.float16):
     torch.manual_seed(20)
 
     # Disable grad to save memory it won't run into OOM on CI machine.
