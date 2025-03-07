@@ -43,12 +43,10 @@ def quantize_fp8(tensor: torch.Tensor,
     max_vals[max_vals == 0] = 1e-8
 
     # Compute scale factors for each channel
-    scale = (FP8_MAX/ max_vals).clamp(1e-12)
-    print(f"scale = {scale}")
+    scale = (FP8_MAX / max_vals).clamp(1e-12)
 
     # Quantize the tensor
     tensor = tensor * scale
-    # tensor = tensor.round_()
     tensor.clamp_(FP8_MIN, FP8_MAX)
     tensor_quantized = tensor.to(FP8_DTYPE_TORCH)
 

@@ -1361,3 +1361,70 @@ def triton_attention(
                                            p_scale, o_scale)
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
+
+def torch_attention(
+        query,
+        key,
+        value,
+        output,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlens_q,
+        max_seqlens_k,
+        causal=False,
+        sm_scale=1.0,
+        bias=None,
+        fp8_scales=None):
+        output = torch.empty_like(query, dtype=torch.float32) if output is None else output
+        from torch.nn.functional import scaled_dot_product_attention
+        num_tokens, num_heads, head_size = query.shape
+        _, num_kv_heads, _ = key.shape
+        num_queries_per_kv = num_heads // num_kv_heads
+        if num_kv_heads != num_heads:
+            key = key.repeat_interleave(num_queries_per_kv, dim=1)
+            value = value.repeat_interleave(num_queries_per_kv, dim=1)
+
+        cu_seqlens_q = cu_seqlens_q.tolist()
+        cu_seqlens_k = cu_seqlens_k.tolist()
+        seqlen_q = cu_seqlens_q[1] - cu_seqlens_q[0]
+        seqlen_k = cu_seqlens_k[1] - cu_seqlens_k[0]
+        attn_masks = [bias] * len(cu_seqlens_q)
+
+        query = query.movedim(0, query.dim() - 2)
+        key = key.movedim(0, key.dim() - 2)
+        value = value.movedim(0, value.dim() - 2)
+
+        causal_attn = causal
+
+        if fp8_scales is not None:
+            (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
+        else:
+            q_scale = k_scale = v_scale = p_scale = o_scale = 1.0
+
+        seqlens_q, seqlens_kv = cu_seqlens_q, cu_seqlens_k
+        start_q, start_kv = 0, 0
+        for seqlen_q, seqlen_kv, mask in zip(seqlens_q, seqlens_kv,
+                                               attn_masks):
+            end_q = start_q + seqlen_q
+            end_kv = start_kv + seqlen_kv
+            if start_q < end_q:
+                sub_out = scaled_dot_product_attention(
+                    query[:, start_q:end_q, :],
+                    key[:, start_kv:end_kv, :],
+                    value[:, start_kv:end_kv, :],
+                    attn_mask=mask,
+                    dropout_p=0.0,
+                    is_causal=causal_attn and mask is None,
+                    scale=sm_scale).movedim(query.dim() - 2, 0)
+                output_shape = output[start_q:end_q,:,:].shape
+                output[start_q:end_q,:,:] = sub_out
+            start_q, start_kv = end_q, end_kv
+            if o_scale is not None:
+                output = output * (1.0 / o_scale)
+        FP8_MIN = float8_info.min
+        FP8_MAX = float8_info.max
+        if fp8_scales is not None:
+            output = torch.clamp(output, FP8_MIN, FP8_MAX)
+        return output, 0
+
+triton_attention = torch_attention
