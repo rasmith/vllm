@@ -1336,9 +1336,9 @@ def triton_attention(
     if fp8_scales is not None:
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
         if q.dtype != eight_bit_dtype:
-            q = quantize_fp8(q, q_scale, eight_bit_dtype)
-            k = quantize_fp8(k, k_scale, eight_bit_dtype)
-            v = quantize_fp8(v, v_scale, eight_bit_dtype)
+            q = quantize_fp8(q, 1.0 / q_scale, eight_bit_dtype)
+            k = quantize_fp8(k, 1.0 / k_scale, eight_bit_dtype)
+            v = quantize_fp8(v, 1.0 / v_scale, eight_bit_dtype)
 
         q_scale = torch.full((q.shape[1], 1, 1),
                              q_scale,
@@ -1356,8 +1356,8 @@ def triton_attention(
                              p_scale,
                              dtype=torch.float32,
                              device=q.device)
-        attn_metadata.set_eight_bit_params(1.0 / q_scale, 1.0 / k_scale,
-                                           1.0 / v_scale, p_scale,
-                                           1.0 / p_scale, o_scale)
+        attn_metadata.set_eight_bit_params(q_scale, k_scale,
+                                          v_scale, 1.0 / p_scale,
+                                           p_scale, o_scale)
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
