@@ -1374,7 +1374,9 @@ def torch_attention(
         causal=False,
         sm_scale=1.0,
         bias=None,
-        fp8_scales=None):
+        fp8_scales=None,
+        eight_bit_dtype = torch.float8_e4m3fnuz
+) -> torch.Tensor:
         output = torch.empty_like(query, dtype=torch.float32) if output is None else output
         from torch.nn.functional import scaled_dot_product_attention
         num_tokens, num_heads, head_size = query.shape
@@ -1384,10 +1386,14 @@ def torch_attention(
             key = key.repeat_interleave(num_queries_per_kv, dim=1)
             value = value.repeat_interleave(num_queries_per_kv, dim=1)
 
-        cu_seqlens_q = cu_seqlens_q.tolist()
-        cu_seqlens_k = cu_seqlens_k.tolist()
-        seqlen_q = cu_seqlens_q[1] - cu_seqlens_q[0]
-        seqlen_k = cu_seqlens_k[1] - cu_seqlens_k[0]
+        if cu_seqlens_k is not None:
+            cu_seqlens_q = cu_seqlens_q.tolist()
+            cu_seqlens_k = cu_seqlens_k.tolist()
+            seqlen_q = cu_seqlens_q[1] - cu_seqlens_q[0]
+            seqlen_k = cu_seqlens_k[1] - cu_seqlens_k[0]
+        else:
+            seqlen_q = max_seqlens_q
+            seqlen_k = max_seqlens_k
         attn_masks = [bias] * len(cu_seqlens_q)
 
         query = query.movedim(0, query.dim() - 2)
@@ -1398,33 +1404,46 @@ def torch_attention(
 
         if fp8_scales is not None:
             (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
-        else:
-            q_scale = k_scale = v_scale = p_scale = o_scale = 1.0
+            if query.dtype != eight_bit_dtype:
+                query  = quantize_fp8(query, 1.0 / q_scale, torch.float8_e4m3fnuz)
+                key = quantize_fp8(key, 1.0 / k_scale, torch.float8_e4m3fnuz)
+                value = quantize_fp8(value, 1.0 / v_scale, torch.float8_e4m3fnuz)
 
+        FP8_MIN = float8_info.min
+        FP8_MAX = float8_info.max
         seqlens_q, seqlens_kv = cu_seqlens_q, cu_seqlens_k
         start_q, start_kv = 0, 0
         for seqlen_q, seqlen_kv, mask in zip(seqlens_q, seqlens_kv,
                                                attn_masks):
             end_q = start_q + seqlen_q
             end_kv = start_kv + seqlen_kv
+
+            q = query[:, start_q:end_q, :]
+            k = key[:, start_kv:end_kv, :]
+            v = value[:, start_kv:end_kv, :]
+
+            if fp8_scales is not None:
+                q = (q.to(torch.float16) * q_scale).clamp(FP8_MIN, FP8_MAX)
+                k = (k.to(torch.float16) * k_scale).clamp(FP8_MIN, FP8_MAX)
+                v = (v.to(torch.float16) * v_scale).clamp(FP8_MIN, FP8_MAX)
+
             if start_q < end_q:
                 sub_out = scaled_dot_product_attention(
-                    query[:, start_q:end_q, :],
-                    key[:, start_kv:end_kv, :],
-                    value[:, start_kv:end_kv, :],
+                    q, k, v,
                     attn_mask=mask,
                     dropout_p=0.0,
                     is_causal=causal_attn and mask is None,
                     scale=sm_scale).movedim(query.dim() - 2, 0)
-                output_shape = output[start_q:end_q,:,:].shape
+
                 output[start_q:end_q,:,:] = sub_out
+
             start_q, start_kv = end_q, end_kv
-            if o_scale is not None:
+
+            if fp8_scales is not None and o_scale is not None:
                 output = output * (1.0 / o_scale)
-        FP8_MIN = float8_info.min
-        FP8_MAX = float8_info.max
+
         if fp8_scales is not None:
-            output = torch.clamp(output, FP8_MIN, FP8_MAX)
+            output = torch.clamp(output, FP8_MIN, FP8_MAX).to(torch.float8_e4m3fnuz)
         return output, 0
 
 triton_attention = torch_attention
