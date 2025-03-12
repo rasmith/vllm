@@ -14,7 +14,6 @@ from vllm.platforms import current_platform
 
 
 FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
-# FP8_DTYPE_TORCH = torch.float16 
 
 float8_info = torch.finfo(FP8_DTYPE_TORCH)
 FP8_MIN = float8_info.min
