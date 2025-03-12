@@ -14,6 +14,7 @@ from vllm.platforms import current_platform
 
 
 FP8_DTYPE_TORCH = torch.float8_e4m3fnuz
+# FP8_DTYPE_TORCH = torch.float16 
 
 float8_info = torch.finfo(FP8_DTYPE_TORCH)
 FP8_MIN = float8_info.min
@@ -491,9 +492,9 @@ def test_op_fwd_fp8(Z,
                                        input_metadata.k_descale,
                                        input_metadata.v_descale)
 
-    q = q.to(torch.float16) * q_descale
-    k = k.to(torch.float16) * k_descale
-    v = v.to(torch.float16) * v_descale
+    q = q_quantized.to(torch.float16) * q_descale
+    k = k_quantized.to(torch.float16) * k_descale
+    v = v_quantized.to(torch.float16) * v_descale
 
     use_dequantized_inputs_for_test = False
     if use_dequantized_inputs_for_test:
@@ -508,29 +509,49 @@ def test_op_fwd_fp8(Z,
                                            o, attn_metadata)
 
     # # [Z, H, N_CTX_Q, D_HEAD] -> [Z, N_CTX_Q, H, D] -> [ Z * N_CTX_Q, H, D ]
-    q = q.transpose(1, 2).contiguous().reshape(Z * N_CTX_Q, H, D_HEAD)
-    k = k.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
-    v = v.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
-    input_metadata.cu_seqlens_q = torch.arange(0, (Z + 1) * N_CTX_Q, 
-                                              step = N_CTX_Q,
-                                              dtype = torch.int32,
-                                              device = q_quantized.device)
-    input_metadata.cu_seqlens_k = torch.arange(0, (Z + 1) * N_CTX_K,
-                                              step = N_CTX_K,
-                                              dtype = torch.int32,
-                                              device = q_quantized.device) 
-    output = None
-    ref_out, _ = torch_attention(q, k, v,
-                    output,
-                    input_metadata.cu_seqlens_q,
-                    input_metadata.cu_seqlens_k,
-                    input_metadata.max_seqlens_q,
-                    input_metadata.max_seqlens_k,
-                    input_metadata.causal,
-                    input_metadata.sm_scale,
-                    input_metadata.bias,)
-    ref_out = ref_out.reshape(Z, N_CTX_Q, H, D_HEAD).transpose(1, 2).contiguous()
+    # q = q.transpose(1, 2).contiguous().reshape(Z * N_CTX_Q, H, D_HEAD)
+    # k = k.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
+    # v = v.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
+    # input_metadata.cu_seqlens_q = torch.arange(0, (Z + 1) * N_CTX_Q, 
+                                              # step = N_CTX_Q,
+                                              # dtype = torch.int32,
+                                              # device = q_quantized.device)
+    # input_metadata.cu_seqlens_k = torch.arange(0, (Z + 1) * N_CTX_K,
+                                              # step = N_CTX_K,
+                                              # dtype = torch.int32,
+                                              # device = q_quantized.device) 
+    # output = None
+    # ref_out, _ = torch_attention(q, k, v,
+                    # output,
+                    # input_metadata.cu_seqlens_q,
+                    # input_metadata.cu_seqlens_k,
+                    # input_metadata.max_seqlens_q,
+                    # input_metadata.max_seqlens_k,
+                    # input_metadata.causal,
+                    # input_metadata.sm_scale,
+                    # input_metadata.bias,)
+    # ref_out = ref_out.reshape(Z, N_CTX_Q, H, D_HEAD).transpose(1, 2).contiguous()
     # ref_out = ref_out.reshape(Z, H, N_CTX_Q, D_HEAD).to(torch.float16)
+# aaaaaaaaaaaaaaaa
+    scores = torch.einsum('bhqd,bhkd->bhqk', q,
+                          k).float() * input_metadata.sm_scale
+    if causal:
+        mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
+                          diagonal=N_CTX_K - N_CTX_Q)
+        scores[:, :, mask == 0] = float("-inf")
+
+    p = torch.softmax(scores, dim=-1)
+    if causal:
+        # If N_CTX_Q > N_CTX_K, there is at least one row of all -infs going
+        # into the softmax. This produces a row of NaNs as -inf - -inf == NaN.
+        # So we fix this by converting the NaNs to 0s, which is what they
+        # should be out of the softmax.
+        nan_mask = torch.isnan(p)
+        p[nan_mask == 1] = 0
+    ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
+# 00000000000000000000000000000000000000000
+    # compare
+    torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
     # Compute score
     # q_descale, k_descale, v_descale = (input_metadata.q_descale,
                                        # input_metadata.k_descale,
@@ -560,12 +581,12 @@ def test_op_fwd_fp8(Z,
     # ref_out[nan_mask] = 0
     # inf_mask = torch.isinf(ref_out)
     # ref_out[inf_mask] = 0
-    # assert (not torch.any(torch.isinf(tri_out)))
-    # assert (not torch.any(torch.isnan(tri_out)))
-    # assert (not torch.any(torch.isinf(ref_out)))
-    # assert (not torch.any(torch.isnan(ref_out)))
+    assert (not torch.any(torch.isinf(tri_out)))
+    assert (not torch.any(torch.isnan(tri_out)))
+    assert (not torch.any(torch.isinf(ref_out)))
+    assert (not torch.any(torch.isnan(ref_out)))
 
-    torch.testing.assert_close(ref_out, tri_out, atol=2e-1, rtol=2e-1)
+    # torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
@@ -751,3 +772,9 @@ def test_op_varlen_mqa_fwd(Z,
         ref_out[start_q:end_q] = torch.einsum('qhk,khd->qhd', p, v_curr)
     triton_attention_rocm(q, k, v, tri_out, input_metadata)
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
+
+def main():
+    test_op_fwd(4, 48, 12, 1, 1, 64, True, False, 'bhsd')
+    test_op_fwd_fp8(4, 48, 1, 1, 64, True, 'bhsd')
+if __name__ == "__main__":
+    main()

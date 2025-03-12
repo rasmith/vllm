@@ -28,6 +28,11 @@ from vllm.platforms import current_platform
 
 SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
+QKV_DTYPE_TRITON = tl.float8e4b8
+QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
+# QKV_DTYPE_TRITON = tl.float16
+# QKV_DTYPE_TORCH = torch.float16
+
 class MetaData:
     cu_seqlens_q = None
     cu_seqlens_k = None
@@ -42,8 +47,8 @@ class MetaData:
     eight_bit = False
     layout = None
     dropout_p, return_encoded_softmax = 0.0, False
-    eight_bit_dtype_triton = tl.float8e4b8
-    eight_bit_dtype_torch = torch.float8_e4m3fnuz
+    eight_bit_dtype_triton = QKV_DTYPE_TRITON
+    eight_bit_dtype_torch = QKV_DTYPE_TORCH
 
     def __init__(self, sm_scale=1.0):
         self.sm_scale = sm_scale
@@ -311,7 +316,8 @@ def _attn_fwd_inner(acc,
                     EIGHT_BIT_GEMM: tl.constexpr,
                     USE_P_SCALE: tl.constexpr,
                     EIGHT_BIT_KV: tl.constexpr,
-                    EIGHT_BIT_DTYPE: tl.constexpr = tl.float8e4b8):
+                    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON):
+    pid_i, pid_j, pid_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     # loop over k, v, and update accumulator
     start_n = block_min
     while start_n < block_max:
@@ -425,7 +431,10 @@ def _attn_fwd_inner(acc,
                 # acc += tl.dot(p, v.to(p.type.element_ty))
                 # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
                 # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
-                acc += tl.dot(p, v.to(p.type.element_ty)) * v_descale
+                # if pid_i == 0 and pid_j == 0:
+                    # if pid_k == 0:
+                        # print(f"v_descale, first time")
+                acc += tl.dot(p, v.to(p.type.element_ty))
         else:
             if EIGHT_BIT_KV:
                 v = (v * v_descale).to(p.type.element_ty)
@@ -607,11 +616,11 @@ autotune_configs, autotune_keys = get_autotune_configs()
 float8_info = torch.finfo(torch.float8_e4m3fnuz)
 
 
-@triton.autotune(
-    configs=autotune_configs,
-    key=autotune_keys,
-    use_cuda_graph=True,
-)
+# @triton.autotune(
+    # configs=autotune_configs,
+    # key=autotune_keys,
+    # use_cuda_graph=True,
+# )
 @triton.jit
 def attn_fwd(
     Q,
@@ -682,8 +691,10 @@ def attn_fwd(
     EIGHT_BIT_KV: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    EIGHT_BIT_DTYPE: tl.constexpr = tl.float8e4b8,
+    EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON,
 ):
+
+    pid_i, pid_j, pid_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -1030,6 +1041,9 @@ def attn_fwd(
                 if EIGHT_BIT and not EIGHT_BIT_KV:
                     if USE_P_SCALE:
                         acc *= p_descale
+                    # if pid_i == 0 and pid_j == 0:
+                        # if pid_k == 0:
+                            # print(f"v_descale, second time")
                     acc *= v_descale
 
                 # epilogue
@@ -1280,7 +1294,12 @@ class _attention(torch.autograd.Function):
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
                        B=batch,
-                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
+                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton,
+                       BLOCK_M= 32,
+                       BLOCK_N= 32,
+                       # waves_per_eu= 4,
+                       PRE_LOAD_V= False,
+                       GRID_CU_MULTIP= 2)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
@@ -1384,7 +1403,7 @@ def torch_attention(
         sm_scale=1.0,
         bias=None,
         fp8_scales=None,
-        eight_bit_dtype = torch.float8_e4m3fnuz
+        eight_bit_dtype = QKV_DTYPE_TORCH
 ) -> torch.Tensor:
         output = torch.empty_like(query, dtype=torch.float32) if output is None else output
         from torch.nn.functional import scaled_dot_product_attention
@@ -1414,9 +1433,9 @@ def torch_attention(
         if fp8_scales is not None:
             (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
             if query.dtype != eight_bit_dtype:
-                query  = quantize_fp8(query, 1.0 / q_scale, torch.float8_e4m3fnuz)
-                key = quantize_fp8(key, 1.0 / k_scale, torch.float8_e4m3fnuz)
-                value = quantize_fp8(value, 1.0 / v_scale, torch.float8_e4m3fnuz)
+                query  = quantize_fp8(query, 1.0 / q_scale, QKV_DTYPE_TORCH)
+                key = quantize_fp8(key, 1.0 / k_scale, QKV_DTYPE_TORCH)
+                value = quantize_fp8(value, 1.0 / v_scale, QKV_DTYPE_TORCH)
 
         FP8_MIN = float8_info.min
         FP8_MAX = float8_info.max
@@ -1452,7 +1471,7 @@ def torch_attention(
                 output = output * (1.0 / o_scale)
 
         if fp8_scales is not None:
-            output = torch.clamp(output, FP8_MIN, FP8_MAX).to(torch.float8_e4m3fnuz)
+            output = torch.clamp(output, FP8_MIN, FP8_MAX).to(QKV_DTYPE_TORCH)
         return output, 0
 
 triton_attention = torch_attention
