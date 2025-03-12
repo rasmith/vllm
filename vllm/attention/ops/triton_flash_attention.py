@@ -30,8 +30,6 @@ SUPPORTED_LAYOUTS = ['thd', 'bhsd', 'bshd']
 
 QKV_DTYPE_TRITON = tl.float8e4b8
 QKV_DTYPE_TORCH = torch.float8_e4m3fnuz
-# QKV_DTYPE_TRITON = tl.float16
-# QKV_DTYPE_TORCH = torch.float16
 
 class MetaData:
     cu_seqlens_q = None
@@ -209,16 +207,6 @@ def load_fn(ptrs, offset_first, offset_second, boundary_first,
 
 
 @triton.jit
-def print_gpu(prefix, val=None):
-    if (tl.program_id(0) == 0) and ((tl.program_id(1) == 0) and
-                                    (tl.program_id(2) == 0)):
-        if val is not None:
-            tl.device_print(prefix, val)
-        else:
-            tl.device_print(prefix)
-
-
-@triton.jit
 def compute_alibi_block(alibi_slope,
                         seqlen_q,
                         seqlen_k,
@@ -317,11 +305,8 @@ def _attn_fwd_inner(acc,
                     USE_P_SCALE: tl.constexpr,
                     EIGHT_BIT_KV: tl.constexpr,
                     EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON):
-    pid_i, pid_j, pid_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
     # loop over k, v, and update accumulator
-    start_n = block_min
-    while start_n < block_max:
-        # for start_n in range(block_min, block_max, BLOCK_N):
+    for start_n in range(block_min, block_max, BLOCK_N):
         # For padded blocks, we will overrun the tensor size if
         # we load all BLOCK_N. For others, the blocks are all within range.
         k_offs_n = start_n + tl.arange(0, BLOCK_N) if MASK_STEPS else None
@@ -353,17 +338,11 @@ def _attn_fwd_inner(acc,
             causal_boundary = start_n + offs_n_causal
             causal_mask = OFFS_M[:, None] >= causal_boundary[None, :]
             qk = tl.where(causal_mask, qk, float("-inf"))
-        # print(f"k_descale = {k_descale},"
-        # f"q_descale = {q_descale},"
-        # f"v_descale = {v_descale},")
+
         # -- compute qk ----
         if EIGHT_BIT_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) *
                    QK_SCALE)
-            # qk += ((((tl.dot(q.to(tl.float32), k.to(tl.float32))* q_descale)) * k_descale) *
-                   # QK_SCALE)
-            # qk += tl.dot(q.to(tl.float32) * q_descale, 
-                         # k.to(tl.float32) * k_descale) *QK_SCALE
         else:
             if EIGHT_BIT_KV:
                 k = (k * k_descale).to(q.type.element_ty)
@@ -428,12 +407,6 @@ def _attn_fwd_inner(acc,
                 acc += tl.dot(p, v)
             else:
                 # v is in eight_bit but p is not, we want the gemm in p's type
-                # acc += tl.dot(p, v.to(p.type.element_ty))
-                # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
-                # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
-                # if pid_i == 0 and pid_j == 0:
-                    # if pid_k == 0:
-                        # print(f"v_descale, first time")
                 acc += tl.dot(p, v.to(p.type.element_ty))
         else:
             if EIGHT_BIT_KV:
@@ -446,7 +419,6 @@ def _attn_fwd_inner(acc,
             bias_ptrs += BLOCK_N * stride_bn
         if RETURN_ENCODED_SOFTMAX:
             encoded_sm_ptrs += BLOCK_N
-        start_n += BLOCK_N
     return acc, l_i, m_i
 
 
@@ -616,11 +588,11 @@ autotune_configs, autotune_keys = get_autotune_configs()
 float8_info = torch.finfo(torch.float8_e4m3fnuz)
 
 
-# @triton.autotune(
-    # configs=autotune_configs,
-    # key=autotune_keys,
-    # use_cuda_graph=True,
-# )
+@triton.autotune(
+    configs=autotune_configs,
+    key=autotune_keys,
+    use_cuda_graph=True,
+)
 @triton.jit
 def attn_fwd(
     Q,
@@ -694,7 +666,6 @@ def attn_fwd(
     EIGHT_BIT_DTYPE: tl.constexpr = QKV_DTYPE_TRITON,
 ):
 
-    pid_i, pid_j, pid_k = tl.program_id(0), tl.program_id(1), tl.program_id(2)
 
     if PERSISTENT:  # if persistent, kernel loops over multiple tiles
         NUM_WG = NUM_CU * GRID_CU_MULTIP  # number of workgroups launched
@@ -1041,9 +1012,6 @@ def attn_fwd(
                 if EIGHT_BIT and not EIGHT_BIT_KV:
                     if USE_P_SCALE:
                         acc *= p_descale
-                    # if pid_i == 0 and pid_j == 0:
-                        # if pid_k == 0:
-                            # print(f"v_descale, second time")
                     acc *= v_descale
 
                 # epilogue
@@ -1172,9 +1140,6 @@ class _attention(torch.autograd.Function):
             else:
                 o = torch.empty_like(q, dtype=metadata.eight_bit_dtype_torch)
 
-        # print(
-            # f"_attention.forward:q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}"
-        # )
         metadata.check_args(q, k, v, o)
 
         batch, nheads_q, nheads_k, head_size = get_shape_from_layout(
@@ -1245,8 +1210,6 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
-        # print(f"RAS:eight_bitv={metadata.eight_bit}")
-        # print(f"RAS:eight_bit_kv={metadata.eight_bit and metadata.eight_bit_kv}")
         attn_fwd[grid](q,
                        k,
                        v,
@@ -1294,12 +1257,7 @@ class _attention(torch.autograd.Function):
                        NUM_CU=NUM_CU,
                        atomic_counter=atomic_counter,
                        B=batch,
-                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton,
-                       BLOCK_M= 32,
-                       BLOCK_N= 32,
-                       # waves_per_eu= 4,
-                       PRE_LOAD_V= False,
-                       GRID_CU_MULTIP= 2)
+                       EIGHT_BIT_DTYPE=metadata.eight_bit_dtype_triton)
 
         ctx.grid = grid
         ctx.sm_scale = metadata.sm_scale
@@ -1360,7 +1318,6 @@ def triton_attention(
     global float8_info
     float8_info = torch.finfo(eight_bit_dtype)
 
-    # print(f"triton_attention:fp8_scales = {fp8_scales}")
     if fp8_scales is not None:
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
         if q.dtype != eight_bit_dtype:
@@ -1389,89 +1346,3 @@ def triton_attention(
                                            p_scale, o_scale)
 
     return triton_attention_rocm(q, k, v, o, attn_metadata)
-
-def torch_attention(
-        query,
-        key,
-        value,
-        output,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlens_q,
-        max_seqlens_k,
-        causal=False,
-        sm_scale=1.0,
-        bias=None,
-        fp8_scales=None,
-        eight_bit_dtype = QKV_DTYPE_TORCH
-) -> torch.Tensor:
-        output = torch.empty_like(query, dtype=torch.float32) if output is None else output
-        from torch.nn.functional import scaled_dot_product_attention
-        num_tokens, num_heads, head_size = query.shape
-        _, num_kv_heads, _ = key.shape
-        num_queries_per_kv = num_heads // num_kv_heads
-        if num_kv_heads != num_heads:
-            key = key.repeat_interleave(num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(num_queries_per_kv, dim=1)
-
-        if cu_seqlens_k is not None:
-            cu_seqlens_q = cu_seqlens_q.tolist()
-            cu_seqlens_k = cu_seqlens_k.tolist()
-            seqlen_q = cu_seqlens_q[1] - cu_seqlens_q[0]
-            seqlen_k = cu_seqlens_k[1] - cu_seqlens_k[0]
-        else:
-            seqlen_q = max_seqlens_q
-            seqlen_k = max_seqlens_k
-        attn_masks = [bias] * len(cu_seqlens_q)
-
-        query = query.movedim(0, query.dim() - 2)
-        key = key.movedim(0, key.dim() - 2)
-        value = value.movedim(0, value.dim() - 2)
-
-        causal_attn = causal
-
-        if fp8_scales is not None:
-            (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
-            if query.dtype != eight_bit_dtype:
-                query  = quantize_fp8(query, 1.0 / q_scale, QKV_DTYPE_TORCH)
-                key = quantize_fp8(key, 1.0 / k_scale, QKV_DTYPE_TORCH)
-                value = quantize_fp8(value, 1.0 / v_scale, QKV_DTYPE_TORCH)
-
-        FP8_MIN = float8_info.min
-        FP8_MAX = float8_info.max
-        seqlens_q, seqlens_kv = cu_seqlens_q, cu_seqlens_k
-        start_q, start_kv = 0, 0
-        for seqlen_q, seqlen_kv, mask in zip(seqlens_q, seqlens_kv,
-                                               attn_masks):
-            end_q = start_q + seqlen_q
-            end_kv = start_kv + seqlen_kv
-
-            q = query[:, start_q:end_q, :]
-            k = key[:, start_kv:end_kv, :]
-            v = value[:, start_kv:end_kv, :]
-
-            if fp8_scales is not None:
-                q = (q.to(torch.float16) * q_scale).clamp(FP8_MIN, FP8_MAX)
-                k = (k.to(torch.float16) * k_scale).clamp(FP8_MIN, FP8_MAX)
-                v = (v.to(torch.float16) * v_scale).clamp(FP8_MIN, FP8_MAX)
-
-            if start_q < end_q:
-                sub_out = scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                    is_causal=causal_attn and mask is None,
-                    scale=sm_scale).movedim(query.dim() - 2, 0)
-
-                output[start_q:end_q,:,:] = sub_out
-
-            start_q, start_kv = end_q, end_kv
-
-            if fp8_scales is not None and o_scale is not None:
-                output = output * (1.0 / o_scale)
-
-        if fp8_scales is not None:
-            output = torch.clamp(output, FP8_MIN, FP8_MAX).to(QKV_DTYPE_TORCH)
-        return output, 0
-
-triton_attention = torch_attention
