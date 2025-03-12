@@ -20,66 +20,6 @@ float8_info = torch.finfo(FP8_DTYPE_TORCH)
 FP8_MIN = float8_info.min
 FP8_MAX = float8_info.max
 
-def torch_attention(
-        query,
-        key,
-        value,
-        output,
-        cu_seqlens_q,
-        cu_seqlens_k,
-        max_seqlens_q,
-        max_seqlens_k,
-        causal=False,
-        sm_scale=1.0,
-        bias=None,
-) -> torch.Tensor:
-        output = torch.empty_like(query, dtype=query.dtype) if output is None else output
-        from torch.nn.functional import scaled_dot_product_attention
-        num_tokens, num_heads, head_size = query.shape
-        _, num_kv_heads, _ = key.shape
-        num_queries_per_kv = num_heads // num_kv_heads
-        if num_kv_heads != num_heads:
-            key = key.repeat_interleave(num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(num_queries_per_kv, dim=1)
-
-        cu_seqlens_q = cu_seqlens_q.tolist()
-        cu_seqlens_k = cu_seqlens_k.tolist()
-
-        attn_masks = [bias] * len(cu_seqlens_q)
-        # print(f"attn_masks={attn_masks}")
-        # print(f"max_seqlens_k = {max_seqlens_k}, max_seqlens_q = {max_seqlens_q}")
-
-        query = query.movedim(0, query.dim() - 2)
-        key = key.movedim(0, key.dim() - 2)
-        value = value.movedim(0, value.dim() - 2)
-
-        causal_attn = causal
-
-        seqlens_q, seqlens_kv = cu_seqlens_q, cu_seqlens_k
-        start_q, start_kv = 0, 0
-        for seqlen_q, seqlen_kv, mask in zip(seqlens_q, seqlens_kv,
-                                               attn_masks):
-            # print(f"seqlens_q={seqlens_q}")
-            end_q = start_q + seqlen_q
-            end_kv = start_kv + seqlen_kv
-
-            if start_q < end_q:
-                q = query[:, start_q:end_q, :]
-                k = key[:, start_kv:end_kv, :]
-                v = value[:, start_kv:end_kv, :]
-                sub_out = scaled_dot_product_attention(
-                    q, k, v,
-                    attn_mask=mask,
-                    dropout_p=0.0,
-                    is_causal=causal_attn and mask is None,
-                    scale=sm_scale).movedim(query.dim() - 2, 0)
-
-                output[start_q:end_q,:,:] = sub_out
-
-            start_q, start_kv = end_q, end_kv
-
-        return output, 0
-
 def get_shape_from_layout(q, k, metadata):
     assert metadata.layout in SUPPORTED_LAYOUTS, "Got unsupported layout."
     if metadata.layout == 'thd':
@@ -451,43 +391,10 @@ def test_op_fwd_fp8(Z,
 
     q_quantized, k_quantized, v_quantized = quantize_input(
         q, k, v, input_metadata)
-    # print(f"q_quantized.shape = {q_quantized.shape}"
-          # f"k_quantized.shape = {k_quantized.shape}"
-          # f"v_quantized.shape = {v_quantized.shape}")
-
 
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
                                        o, input_metadata)
 
-# @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
-
-
-
-    # print(f"input_metadata.cu_seqlens_q = {input_metadata.cu_seqlens_q}"
-          # f"input_metadata.cu_seqlens_k = {input_metadata.cu_seqlens_k}")
-
-# def torch_attention(
-        # query,
-        # key,
-        # value,
-        # output,
-        # cu_seqlens_q,
-        # cu_seqlens_k,
-        # max_seqlens_q,
-        # max_seqlens_k,
-        # causal=False,
-        # sm_scale=1.0,
-        # bias=None,
-        # fp8_scales=None,
-        # eight_bit_dtype = torch.float8_e4m3fnuz
-# ) -> torch.Tensor:
-    # print(f"bias={input_metadata.bias}")
-    # print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
-          # f"{input_metadata.q_descale.repeat_interleave(Z, dim=1).shape}")
-    # print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
-          # f"{input_metadata.q_descale.repeat_interleave(Z, dim=2).shape}")
-    # print(f"Z={Z},H={H},N_CTX_K={N_CTX_K},D_HEAD={D_HEAD},"
-          # f"q_quantized shape --> {q_quantized.reshape(Z*H,N_CTX_Q,D_HEAD).shape}")
     q_descale, k_descale, v_descale = (input_metadata.q_descale,
                                        input_metadata.k_descale,
                                        input_metadata.v_descale)
@@ -496,43 +403,6 @@ def test_op_fwd_fp8(Z,
     k = k_quantized.to(torch.float16) * k_descale
     v = v_quantized.to(torch.float16) * v_descale
 
-    use_dequantized_inputs_for_test = False
-    if use_dequantized_inputs_for_test:
-        attn_metadata = MetaData(sm_scale = input_metadata.sm_scale)
-        attn_metadata.max_seqlens_q = input_metadata.max_seqlens_q
-        attn_metadata.max_seqlens_k = input_metadata.max_seqlens_k
-        attn_metadata.causal = input_metadata.causal
-        attn_metadata.bias = input_metadata.bias
-        attn_metadata.layout = input_metadata.layout
-        o = torch.empty_like(q)
-        tri_out, _ = triton_attention_rocm(q, k, v,
-                                           o, attn_metadata)
-
-    # # [Z, H, N_CTX_Q, D_HEAD] -> [Z, N_CTX_Q, H, D] -> [ Z * N_CTX_Q, H, D ]
-    # q = q.transpose(1, 2).contiguous().reshape(Z * N_CTX_Q, H, D_HEAD)
-    # k = k.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
-    # v = v.transpose(1, 2).contiguous().reshape(Z * N_CTX_K, H, D_HEAD)
-    # input_metadata.cu_seqlens_q = torch.arange(0, (Z + 1) * N_CTX_Q, 
-                                              # step = N_CTX_Q,
-                                              # dtype = torch.int32,
-                                              # device = q_quantized.device)
-    # input_metadata.cu_seqlens_k = torch.arange(0, (Z + 1) * N_CTX_K,
-                                              # step = N_CTX_K,
-                                              # dtype = torch.int32,
-                                              # device = q_quantized.device) 
-    # output = None
-    # ref_out, _ = torch_attention(q, k, v,
-                    # output,
-                    # input_metadata.cu_seqlens_q,
-                    # input_metadata.cu_seqlens_k,
-                    # input_metadata.max_seqlens_q,
-                    # input_metadata.max_seqlens_k,
-                    # input_metadata.causal,
-                    # input_metadata.sm_scale,
-                    # input_metadata.bias,)
-    # ref_out = ref_out.reshape(Z, N_CTX_Q, H, D_HEAD).transpose(1, 2).contiguous()
-    # ref_out = ref_out.reshape(Z, H, N_CTX_Q, D_HEAD).to(torch.float16)
-# aaaaaaaaaaaaaaaa
     scores = torch.einsum('bhqd,bhkd->bhqk', q,
                           k).float() * input_metadata.sm_scale
     if causal:
@@ -549,45 +419,9 @@ def test_op_fwd_fp8(Z,
         nan_mask = torch.isnan(p)
         p[nan_mask == 1] = 0
     ref_out = torch.einsum('bhqk,bhkd->bhqd', p.half(), v)
-# 00000000000000000000000000000000000000000
+
     # compare
     torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
-    # Compute score
-    # q_descale, k_descale, v_descale = (input_metadata.q_descale,
-                                       # input_metadata.k_descale,
-                                       # input_metadata.v_descale)
-    # scores = (torch.einsum('bhqd,bhkd->bhqk', q_quantized.half(),
-                           # k_quantized.half()) * q_descale *
-              # k_descale) * input_metadata.sm_scale
-
-    # if causal:
-        # mask = torch.tril(torch.ones(N_CTX_Q, N_CTX_K, device="cuda"),
-                          # diagonal=N_CTX_K - N_CTX_Q)
-        # scores[:, :, mask == 0] = float("-inf")
-
-    # p = torch.softmax(scores, dim=-1)
-    # p = p.to(FP8_DTYPE_TORCH).half()
-    # ref_out = torch.empty_like(q, dtype = torch.float16)
-    # batch_size, num_heads_q, seqlen_q, head_size = q.shape
-    # print(f"torch version= {torch.__version__}")
-    # print(f"p.shape = {p.shape}, v_quantized.shape = {v_quantized.shape}, q.shape={q.shape}")
-    # ref_out = (torch.einsum('bhqk,bhkd->bhqd', p.float(),
-                            # v_quantized.float()) * v_descale).to(torch.float16)
-    # # ref_out = (torch.einsum('bhqk,bhkd->bhqd', p.float(),
-                             # # v_quantized.float()) * v_descale).to(torch.float16)
-    # print(f"ref_out.dtype = {ref_out.dtype}, tri_out.dtype = {tri_out.dtype}")
-
-    # nan_mask = torch.isnan(ref_out)
-    # ref_out[nan_mask] = 0
-    # inf_mask = torch.isinf(ref_out)
-    # ref_out[inf_mask] = 0
-    assert (not torch.any(torch.isinf(tri_out)))
-    assert (not torch.any(torch.isnan(tri_out)))
-    assert (not torch.any(torch.isinf(ref_out)))
-    assert (not torch.any(torch.isnan(ref_out)))
-
-    # torch.testing.assert_close(ref_out, tri_out, atol=2e-2, rtol=2e-2)
-
 
 @pytest.mark.parametrize('Z, H, N_CTX_Q, N_CTX_K, D_HEAD', [
     (4, 48, 1, 1, 64),
