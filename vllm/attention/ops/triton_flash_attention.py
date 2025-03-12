@@ -354,6 +354,10 @@ def _attn_fwd_inner(acc,
         if EIGHT_BIT_GEMM:
             qk += ((((tl.dot(q, k).to(tl.float32) * q_descale)) * k_descale) *
                    QK_SCALE)
+            # qk += ((((tl.dot(q.to(tl.float32), k.to(tl.float32))* q_descale)) * k_descale) *
+                   # QK_SCALE)
+            # qk += tl.dot(q.to(tl.float32) * q_descale, 
+                         # k.to(tl.float32) * k_descale) *QK_SCALE
         else:
             if EIGHT_BIT_KV:
                 k = (k * k_descale).to(q.type.element_ty)
@@ -418,7 +422,10 @@ def _attn_fwd_inner(acc,
                 acc += tl.dot(p, v)
             else:
                 # v is in eight_bit but p is not, we want the gemm in p's type
-                acc += tl.dot(p, v.to(p.type.element_ty))
+                # acc += tl.dot(p, v.to(p.type.element_ty))
+                # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
+                # acc += tl.dot(p.to(tl.float32), v.to(tl.float32) * v_descale)
+                acc += tl.dot(p, v.to(p.type.element_ty)) * v_descale
         else:
             if EIGHT_BIT_KV:
                 v = (v * v_descale).to(p.type.element_ty)
@@ -1151,9 +1158,9 @@ class _attention(torch.autograd.Function):
             else:
                 o = torch.empty_like(q, dtype=metadata.eight_bit_dtype_torch)
 
-        print(
-            f"_attention.forward:q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}"
-        )
+        # print(
+            # f"_attention.forward:q.dtype={q.dtype}, k.dtype={k.dtype}, v.dtype={v.dtype}"
+        # )
         metadata.check_args(q, k, v, o)
 
         batch, nheads_q, nheads_k, head_size = get_shape_from_layout(
@@ -1224,6 +1231,8 @@ class _attention(torch.autograd.Function):
 
         atomic_counter = torch.zeros([1], device=q.device, dtype=torch.int32)
 
+        # print(f"RAS:eight_bitv={metadata.eight_bit}")
+        # print(f"RAS:eight_bit_kv={metadata.eight_bit and metadata.eight_bit_kv}")
         attn_fwd[grid](q,
                        k,
                        v,
@@ -1332,7 +1341,7 @@ def triton_attention(
     global float8_info
     float8_info = torch.finfo(eight_bit_dtype)
 
-    print(f"triton_attention:fp8_scales = {fp8_scales}")
+    # print(f"triton_attention:fp8_scales = {fp8_scales}")
     if fp8_scales is not None:
         (q_scale, k_scale, v_scale, p_scale, o_scale) = fp8_scales
         if q.dtype != eight_bit_dtype:

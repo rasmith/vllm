@@ -45,8 +45,8 @@ def torch_attention(
         cu_seqlens_k = cu_seqlens_k.tolist()
 
         attn_masks = [bias] * len(cu_seqlens_q)
-        print(f"attn_masks={attn_masks}")
-        print(f"max_seqlens_k = {max_seqlens_k}, max_seqlens_q = {max_seqlens_q}")
+        # print(f"attn_masks={attn_masks}")
+        # print(f"max_seqlens_k = {max_seqlens_k}, max_seqlens_q = {max_seqlens_q}")
 
         query = query.movedim(0, query.dim() - 2)
         key = key.movedim(0, key.dim() - 2)
@@ -58,7 +58,7 @@ def torch_attention(
         start_q, start_kv = 0, 0
         for seqlen_q, seqlen_kv, mask in zip(seqlens_q, seqlens_kv,
                                                attn_masks):
-            print(f"seqlens_q={seqlens_q}")
+            # print(f"seqlens_q={seqlens_q}")
             end_q = start_q + seqlen_q
             end_kv = start_kv + seqlen_kv
 
@@ -450,9 +450,9 @@ def test_op_fwd_fp8(Z,
 
     q_quantized, k_quantized, v_quantized = quantize_input(
         q, k, v, input_metadata)
-    print(f"q_quantized.shape = {q_quantized.shape}"
-          f"k_quantized.shape = {k_quantized.shape}"
-          f"v_quantized.shape = {v_quantized.shape}")
+    # print(f"q_quantized.shape = {q_quantized.shape}"
+          # f"k_quantized.shape = {k_quantized.shape}"
+          # f"v_quantized.shape = {v_quantized.shape}")
 
 
     tri_out, _ = triton_attention_rocm(q_quantized, k_quantized, v_quantized,
@@ -462,8 +462,8 @@ def test_op_fwd_fp8(Z,
 
 
 
-    print(f"input_metadata.cu_seqlens_q = {input_metadata.cu_seqlens_q}"
-          f"input_metadata.cu_seqlens_k = {input_metadata.cu_seqlens_k}")
+    # print(f"input_metadata.cu_seqlens_q = {input_metadata.cu_seqlens_q}"
+          # f"input_metadata.cu_seqlens_k = {input_metadata.cu_seqlens_k}")
 
 # def torch_attention(
         # query,
@@ -480,13 +480,13 @@ def test_op_fwd_fp8(Z,
         # fp8_scales=None,
         # eight_bit_dtype = torch.float8_e4m3fnuz
 # ) -> torch.Tensor:
-    print(f"bias={input_metadata.bias}")
-    print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
-          f"{input_metadata.q_descale.repeat_interleave(Z, dim=1).shape}")
-    print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
-          f"{input_metadata.q_descale.repeat_interleave(Z, dim=2).shape}")
-    print(f"Z={Z},H={H},N_CTX_K={N_CTX_K},D_HEAD={D_HEAD},"
-          f"q_quantized shape --> {q_quantized.reshape(Z*H,N_CTX_Q,D_HEAD).shape}")
+    # print(f"bias={input_metadata.bias}")
+    # print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
+          # f"{input_metadata.q_descale.repeat_interleave(Z, dim=1).shape}")
+    # print(f"input_metadata.q_descale:{input_metadata.q_descale.shape} -->"
+          # f"{input_metadata.q_descale.repeat_interleave(Z, dim=2).shape}")
+    # print(f"Z={Z},H={H},N_CTX_K={N_CTX_K},D_HEAD={D_HEAD},"
+          # f"q_quantized shape --> {q_quantized.reshape(Z*H,N_CTX_Q,D_HEAD).shape}")
     q_descale, k_descale, v_descale = (input_metadata.q_descale,
                                        input_metadata.k_descale,
                                        input_metadata.v_descale)
