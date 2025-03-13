@@ -7,8 +7,7 @@ from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
-    requantize_with_max_scale)
+    Fp8LinearOp, normalize_e4m3fn_to_e4m3fnuz, requantize_with_max_scale)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
@@ -22,7 +21,7 @@ class QuarkW8A8Fp8(QuarkScheme):
     def __init__(self, qscheme: str, is_static_input_scheme: Optional[bool]):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
-        self.cutlass_fp8_supported = cutlass_fp8_supported()
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=True)
         self.out_dtype = torch.get_default_dtype()
 
     @classmethod
@@ -35,32 +34,29 @@ class QuarkW8A8Fp8(QuarkScheme):
         # tensor scales (thus N scales being passed to the kernel),
         # requantize so we can always run per tensor
         if self.qscheme == "per_tensor":
-            if current_platform.is_rocm():
-                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    weight=layer.weight,
-                    weight_scale=layer.weight_scale,
-                    input_scale=layer.input_scale)
-            else:
-                max_w_scale = layer.weight_scale
-                weight = layer.weight
-                input_scale = layer.input_scape
-
             max_w_scale, weight = requantize_with_max_scale(
-                weight=weight,
-                weight_scale=max_w_scale,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
                 logical_widths=layer.logical_widths,
             )
 
+            if current_platform.is_fp8_fnuz():
+                weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
+                    weight=weight,
+                    weight_scale=max_w_scale,
+                    input_scale=layer.input_scale)
+                if input_scale is not None:
+                    layer.input_scale = Parameter(input_scale,
+                                                  requires_grad=False)
+
             layer.weight = Parameter(weight.t(), requires_grad=False)
             layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
-            if input_scale is not None:
-                layer.input_scale = Parameter(input_scale, requires_grad=False)
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.qscheme == "per_channel":
             weight = layer.weight
 
-            if current_platform.is_rocm():
+            if current_platform.is_fp8_fnuz():
                 weight, weight_scale, input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=weight,
@@ -136,12 +132,9 @@ class QuarkW8A8Fp8(QuarkScheme):
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return apply_fp8_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-            cutlass_fp8_supported=self.cutlass_fp8_supported,
-            use_per_token_if_dynamic=True)
+        return self.fp8_linear.apply(input=x,
+                                     weight=layer.weight,
+                                     weight_scale=layer.weight_scale,
+                                     out_dtype=self.out_dtype,
+                                     input_scale=layer.input_scale,
+                                     bias=bias)
