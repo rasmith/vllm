@@ -56,7 +56,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 # We prefer to use separate k_scale and v_scale if present
                 k_scale = layer.k_scale.to("cpu").tolist()
                 v_scale = layer.v_scale.to("cpu").tolist()
-                if current_platform.is_rocm():
+                if current_platform.is_fp8_fnuz():
                     k_scale *= 2
                     v_scale *= 2
             elif layer.k_scale < 0.0 and layer.v_scale < 0.0:
@@ -72,7 +72,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 scale_to_duplicate = max(layer.k_scale, layer.v_scale)
                 k_scale = scale_to_duplicate.to("cpu").tolist()
                 v_scale = scale_to_duplicate.to("cpu").tolist()
-                if current_platform.is_rocm():
+                if current_platform.is_fp8_fnuz():
                     k_scale *= 2
                     v_scale *= 2
 
