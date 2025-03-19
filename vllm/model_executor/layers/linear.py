@@ -224,6 +224,8 @@ class LinearBase(torch.nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
+        if "gate" in prefix:
+            print(f"LinearBase::quant_config={quant_config}, prefix={prefix}")
         if quant_config is None:
             self.quant_method: Optional[
                 QuantizeMethodBase] = UnquantizedLinearMethod()
@@ -274,6 +276,10 @@ class ReplicatedLinear(LinearBase):
 
         # All the linear layer supports quant method.
         assert self.quant_method is not None
+        if "gate" in prefix:
+            print(
+                f"ReplicatedLinear:self.quant_method={self.quant_method}, prefix={prefix}"
+            )
         self.quant_method.create_weights(self,
                                          self.input_size, [self.output_size],
                                          self.input_size,

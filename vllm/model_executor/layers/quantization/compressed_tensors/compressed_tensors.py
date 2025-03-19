@@ -86,8 +86,14 @@ class CompressedTensorsConfig(QuantizationConfig):
         if should_ignore_layer(prefix,
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):
+            print(
+                f"CompressedTensorsConfig::get_quant_method:ignoring prefix={prefix},"
+                f"layer_type={type(layer)}")
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
+            print(
+                f"CompressedTensorsConfig::get_quant_method:got LinearBase:type(self)={type(self)},"
+                f"layer_name={prefix}")
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
             if scheme is None:
                 return UnquantizedLinearMethod()
