@@ -78,15 +78,17 @@ class MixtralMoE(nn.Module):
 
         # Gate always runs at half / full precision for now.
 
-        if "gate" in prefix:
-            print(f"MixtralMoE:quant_config = {quant_config}")
         self.gate = ReplicatedLinear(hidden_size,
                                      num_experts,
                                      bias=False,
                                      params_dtype=params_dtype,
-                                     quant_config=quant_config,
+                                     quant_config=quant_config if quant_config.quant_format == "int-quantized" else None,
                                      prefix=f"{prefix}.gate")
 
+        print(f"self.gate.weight.shape = {self.gate.weight.shape},"
+              f"self.gate.weight.dtype = {self.gate.weight.dtype}")
+        print(f"self.gate.weight_scale.shape = {self.gate.weight_scale.shape},"
+              f"self.gate.weight_scale.dtype = {self.gate.weight_scale.dtype}")
         self.experts = FusedMoE(num_experts=num_experts,
                                 top_k=top_k,
                                 hidden_size=hidden_size,

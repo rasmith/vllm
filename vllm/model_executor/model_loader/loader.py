@@ -166,6 +166,7 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
+                print(f"_process_weights_after_loading:name = {_}")
                 quant_method.process_weights_after_loading(module)
 
     # Currently only used by MLA.

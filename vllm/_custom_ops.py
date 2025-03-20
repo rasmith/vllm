@@ -520,7 +520,13 @@ def cutlass_scaled_mm(a: torch.Tensor,
         scale_a.shape * [1, 128] == a.shape
         scale_b.shape * [128, 128] == b.shape
     """
-    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    # import traceback
+    # print("="*10+" CUTLASS_SCALED_MM" + "="*10)
+    # traceback.print_stack()
+    print(f"cutlass_scaled_mm:a.shape={a.shape},"
+          f"b.shape={b.shape},"
+          f"scale_a.shape={scale_a.shape},"
+          f"scale_b.shape={scale_b.shape}")
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.shape[0] == b.shape[
         1] and bias.dtype == out_dtype
@@ -535,6 +541,7 @@ def cutlass_scaled_mm(a: torch.Tensor,
         triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
         return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)

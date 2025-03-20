@@ -267,7 +267,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations")
 
-        print(f"self.weight_quant.strategy = {self.weight_quant.strategy},"
+        print(f"CompressedTensorsW8A8Int8MoEMethod:self.weight_quant.strategy = {self.weight_quant.strategy},"
               f"self.input_quant.strategy = {self.input_quant.strategy}")
 
         supported_quantization_strategies = [
@@ -316,8 +316,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         # They will be combined to a single scale after weight loading.
         w13_weight_scale = torch.nn.Parameter(torch.ones(
             num_experts,
-            1,
             2 * intermediate_size_per_partition,
+            1,
             dtype=torch.float32),
                                               requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
@@ -375,37 +375,16 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             layer.w2_input_scale = torch.nn.Parameter(
                 layer.w2_input_scale.max(), requires_grad=False)
 
-        if current_platform.is_fp8_fnuz():
-            # Normalize the weights and scales
-            w13_weight, w13_weight_scale, w13_input_scale = \
-                normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w13_weight, layer.w13_weight_scale,
-                    layer.w13_input_scale)
-            w2_weight, w2_weight_scale, w2_input_scale = \
-                normalize_e4m3fn_to_e4m3fnuz(
-                    layer.w2_weight, layer.w2_weight_scale,
-                    layer.w2_input_scale)
-            # Reset the parameter
-            layer.w13_weight = torch.nn.Parameter(w13_weight,
-                                                  requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(w13_weight_scale,
-                                                        requires_grad=False)
-            if w13_input_scale is not None:
-                layer.w13_input_scale = torch.nn.Parameter(w13_input_scale,
-                                                           requires_grad=False)
-            layer.w2_weight = torch.nn.Parameter(w2_weight,
-                                                 requires_grad=False)
-            layer.w2_weight_scale = torch.nn.Parameter(w2_weight_scale,
-                                                       requires_grad=False)
-            if w2_input_scale is not None:
-                layer.w2_input_scale = torch.nn.Parameter(w2_input_scale,
-                                                          requires_grad=False)
-
         # Fp8 moe kernel needs single weight scale for w13 per expert.
         # We take the max then dequant and requant each expert.
         assert layer.w13_weight_scale is not None
         shard_size = layer.intermediate_size_per_partition
+        print(f"process_weights_after_loading:shard_size={shard_size}")
+        print(f"process_weights_after_loading:layer.w13_weight_scale.shape={layer.w13_weight_scale.shape}")
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
+        print(f"process_weights_after_loading:max_w13_scales.shape={max_w13_scales.shape}")
+        print(f"process_weights_after_loading:layer.w13_weight.shape = {layer.w13_weight.shape}"
+              f"layer.w13_weight_scale.shape = {layer.w13_weight_scale.shape}")
         for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
@@ -419,6 +398,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
 
         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                     requires_grad=False)
+
 
     def apply(
         self,
