@@ -85,10 +85,6 @@ class MixtralMoE(nn.Module):
                                      quant_config=quant_config if quant_config.quant_format == "int-quantized" else None,
                                      prefix=f"{prefix}.gate")
 
-        print(f"self.gate.weight.shape = {self.gate.weight.shape},"
-              f"self.gate.weight.dtype = {self.gate.weight.dtype}")
-        print(f"self.gate.weight_scale.shape = {self.gate.weight_scale.shape},"
-              f"self.gate.weight_scale.dtype = {self.gate.weight_scale.dtype}")
         self.experts = FusedMoE(num_experts=num_experts,
                                 top_k=top_k,
                                 hidden_size=hidden_size,
@@ -212,8 +208,6 @@ class MixtralDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn")
-        print(
-            "210:loaded_weights:params_dict:",
             list(
                 filter(lambda x: "gate" in x,
                        (dict(self.named_parameters())).keys())))
@@ -224,11 +218,6 @@ class MixtralDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
             prefix=f"{prefix}.block_sparse_moe")
-        print(
-            "220:loaded_weights:params_dict:",
-            list(
-                filter(lambda x: "gate" in x,
-                       (dict(self.named_parameters())).keys())))
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -288,11 +277,6 @@ class MixtralModel(nn.Module):
             ),
             prefix=f"{prefix}.layers")
 
-        print(
-            "341:loaded_weights:params_dict:",
-            list(
-                filter(lambda x: "gate" in x,
-                       (dict(self.named_parameters())).keys())))
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -428,10 +412,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             num_experts=self.config.num_local_experts)
 
         params_dict = dict(self.named_parameters())
-        # print("loaded_weights:params_dict:",list(params_dict.keys()))
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
-            # print(f"name = {name}")
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -499,13 +481,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
-                    if "gate" in name:
-                        print(f"gate name = {name}")
 
-                    if name == "model.layers.28.block_sparse_moe.gate.weight":
-                        print(f"params -->  {name}")
-                    if name == "model.layers.27.block_sparse_moe.gate.weight_scale":
-                        print("layer 27 gate weight scale!")
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
