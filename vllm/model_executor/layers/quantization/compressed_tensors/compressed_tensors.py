@@ -238,6 +238,34 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Only symmetric weight quantization supported.
         return is_8_bits and is_token and weight_quant.symmetric and is_dynamic
 
+    def _is_int8_w8a8(self, weight_quant: BaseModel,
+                     input_quant: BaseModel) -> bool:
+        # Confirm weights and activations quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        # Confirm weight scheme is supported.
+        is_int = (weight_quant.type == QuantizationType.INT
+                             and input_quant.type == QuantizationType.INT)
+        is_symmetric_weight = weight_quant.symmetric
+        is_static_weight = not weight_quant.dynamic
+        is_per_tensor_or_channel_weight = (weight_quant.strategy in [
+            QuantizationStrategy.TENSOR, QuantizationStrategy.CHANNEL
+        ])
+        if not (is_int and is_symmetric_weight and is_static_weight
+                and is_per_tensor_or_channel_weight):
+            return False
+
+        # Dynamic quantization is always supported if weights supported.
+        if input_quant.dynamic:
+            return True
+
+        # Confirm activation scheme is supported.
+        is_symmetric_activation = input_quant.symmetric
+        is_per_tensor_activation = (
+            input_quant.strategy == QuantizationStrategy.TENSOR)
+        return is_symmetric_activation and is_per_tensor_activation
+
     def _is_fp8_w8a8(self, weight_quant: BaseModel,
                      input_quant: BaseModel) -> bool:
         # Confirm weights and activations quantized.
@@ -351,7 +379,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     is_static_input_scheme=True,
                     input_symmetric=input_quant.symmetric)
 
-            if self._is_dynamic_token_w8a8(weight_quant, input_quant):
+            if self._is_int8_w8a8(weight_quant, input_quant):
                 return CompressedTensorsW8A8Int8(
                     strategy=weight_quant.strategy,
                     is_static_input_scheme=False,

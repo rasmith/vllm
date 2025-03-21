@@ -54,7 +54,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
             return CompressedTensorsWNA16MoEMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Fp8MoEMethod(quant_config)
-        elif quant_config._is_dynamic_token_w8a8(weight_quant, input_quant):
+        elif quant_config._is_int8_w8a8(weight_quant, input_quant):
             return CompressedTensorsW8A8Int8MoEMethod(quant_config)
         else:
             raise RuntimeError(
@@ -197,9 +197,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
+                #NOTE: Need to check if this is working or not
                 dq_weight = per_tensor_dequantize(
                     layer.w13_weight[expert_id][start:start + shard_size, :],
                     layer.w13_weight_scale[expert_id][shard_id])
+                #NOTE: Weights are int8, so need to check if working as well.
                 layer.w13_weight[expert_id][
                     start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                         dq_weight, max_w13_scales[expert_id])
@@ -270,14 +272,12 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         print(f"CompressedTensorsW8A8Int8MoEMethod:self.weight_quant.strategy = {self.weight_quant.strategy},"
               f"self.input_quant.strategy = {self.input_quant.strategy}")
 
-        supported_quantization_strategies = [
-            QuantizationStrategy.TOKEN, QuantizationStrategy.CHANNEL
-        ]
+        supported_quantization_strategies = [QuantizationStrategy.CHANNEL,QuantizationStrategy.TENSOR]
         if not (self.weight_quant.strategy in supported_quantization_strategies
                 and self.input_quant.strategy
                 in supported_quantization_strategies):
             raise ValueError(
-                "For Int8 Fused MoE layers, only per-token/per-channel scales "
+                "For Int8 Fused MoE layers, only per-tensor/per-channel scales "
                 "for weights and activations are supported. Found "
                 f"{self.weight_quant}, {self.input_quant}")
 
@@ -382,8 +382,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         print(f"process_weights_after_loading:shard_size={shard_size}")
         print(f"process_weights_after_loading:layer.w13_weight_scale.shape={layer.w13_weight_scale.shape}")
         max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        print(f"process_weights_after_loading:max_w13_scales.shape={max_w13_scales.shape}")
-        print(f"process_weights_after_loading:layer.w13_weight.shape = {layer.w13_weight.shape}"
+        print(f"process_weights_after_loading:max_w13_scales.shape={max_w13_scales.shape},")
+        print(f"process_weights_after_loading:layer.w13_weight.shape ={layer.w13_weight.shape},"
               f"layer.w13_weight_scale.shape = {layer.w13_weight_scale.shape}")
         for expert_id in range(layer.local_num_experts):
             start = 0

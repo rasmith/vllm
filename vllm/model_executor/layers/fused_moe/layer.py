@@ -38,7 +38,6 @@ class FusedMoeWeightScaleSupported(Enum):
     CHANNEL = "channel"
     GROUP = "group"
     BLOCK = "block"
-    TOKEN = "token"
 
 
 class FusedMoEMethodBase(QuantizeMethodBase):
