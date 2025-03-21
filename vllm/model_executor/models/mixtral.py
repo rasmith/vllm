@@ -208,9 +208,6 @@ class MixtralDecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn")
-            list(
-                filter(lambda x: "gate" in x,
-                       (dict(self.named_parameters())).keys())))
         self.block_sparse_moe = MixtralMoE(
             num_experts=config.num_local_experts,
             top_k=config.num_experts_per_tok,
