@@ -419,6 +419,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
+        print(f"x.dtype={x.dtype}")
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -438,7 +439,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                              topk_ids=topk_ids,
                              inplace=True,
                              activation=activation,
-                             use_fp8_w8a8=True,
+                             use_int8_w8a8=True,
                              global_num_experts=global_num_experts,
                              expert_map=expert_map,
                              w1_scale=layer.w13_weight_scale,
