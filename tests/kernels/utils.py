@@ -1056,9 +1056,18 @@ def compute_max_diff(output, output_ref):
 def torch_moe(a, w1, w2, score, topk, expert_map):
     B, D = a.shape
     a = a.view(B, -1, D).repeat(1, topk, 1).reshape(-1, D)
+    print(f"a.view(B,-1,D).repeat(1, topk, 1).shape = {a.view(B, -1,D).repeat(1, topk, 1).shape}")
+    print(f"a.shape={a.shape}")
     out = torch.zeros(B * topk, w2.shape[1], dtype=a.dtype, device=a.device)
+    print(f"before softmax:score.shape={score.shape}")
     score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    print(f"after softmax:score.shape={score.shape}")
+    print(f"score={score}")
     topk_weight, topk_ids = torch.topk(score, topk)
+    print(f"topk_weight={topk_weight}")
+    print(f"topk_ids={topk_ids}")
+    print(f"topk_weight.shape = {topk_weight.shape}")
+    print(f"topk_ids.shape={topk_ids.shape}")
     topk_weight = topk_weight.view(-1)
     topk_ids = topk_ids.view(-1)
     if expert_map is not None:
@@ -1068,8 +1077,10 @@ def torch_moe(a, w1, w2, score, topk, expert_map):
         if mask.sum():
             out[mask] = SiluAndMul()(
                 a[mask] @ w1[i].transpose(0, 1)) @ w2[i].transpose(0, 1)
-    return (out.view(B, -1, w2.shape[1]) *
+    result = (out.view(B, -1, w2.shape[1]) *
             topk_weight.view(B, -1, 1).to(out.dtype)).sum(dim=1)
+    print(f"result.shape={result.shape}")
+    return result
 
 
 def torch_moe_single(a, w, score, topk):
@@ -1156,3 +1167,23 @@ def baseline_scaled_mm(a: torch.Tensor,
         output = output + bias
 
     return output
+
+def main():
+    m = 3
+    n =  8
+    k = 5
+    e = 4
+    topk = 2
+    ep_size = 1
+    dtype=torch.float16
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    result = torch_moe(a, w1, w2, score, topk, None)
+    print(f"result.shape={result.shape}")
+
+if __name__ == "__main__":
+    main()

@@ -89,10 +89,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
             scheme = self.get_scheme(layer=layer, layer_name=prefix)
-            if "gate" in prefix:
-                print(
-                    f"CompressedTensorsConfig::get_quant_method:got LinearBase:type(self)={type(self)},"
-                    f"layer_name={prefix}, scheme={scheme}")
+            # if "gate" in prefix:
+                # print(
+                    # f"CompressedTensorsConfig::get_quant_method:got LinearBase:type(self)={type(self)},"
+                    # f"layer_name={prefix}, scheme={scheme}")
             if scheme is None:
                 return UnquantizedLinearMethod()
             layer.scheme = scheme

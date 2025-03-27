@@ -373,7 +373,12 @@ def fused_moe_kernel(
                             offs_bsn * stride_bsn)
         else:
             a_scale = tl.load(a_scale_ptr)
-            b_scale = tl.load(b_scale_ptr + off_experts)
+            if use_int8_w8a8:
+                b_scale_ptrs = (b_scale_ptr + off_experts * stride_bse +
+                                offs_bn * stride_bsn)
+                b_scale = tl.load(b_scale_ptrs)
+            else:
+                b_scale = tl.load(b_scale_ptr + off_experts)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -701,6 +706,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
     elif use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None
+        # print(f"A_scale={A_scale}")
         A, A_scale, _ = ops.scaled_int8_quant(A, A_scale)
     elif use_int8_w8a16 or use_int4_w4a16:
         assert B_scale is not None
@@ -791,7 +797,7 @@ def invoke_fused_moe_kernel(A: torch.Tensor,
         )
 
     else:
-        print(f"A.dtype={A.dtype},B.dtype={B.dtype},C.dtype={C.dtype}")
+        # print(f"A.dtype={A.dtype},B.dtype={B.dtype},C.dtype={C.dtype}")
         fused_moe_kernel[grid](
             A,
             B,
@@ -1423,6 +1429,8 @@ def fused_experts_impl(hidden_states: torch.Tensor,
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
                                  global_num_experts, expert_map))
 
+        print(f"expert_ids.shape={expert_ids.shape}")
+        print(f"expert_ids={expert_ids}")
         invoke_fused_moe_kernel(curr_hidden_states,
                                 w1,
                                 intermediate_cache1,
@@ -1562,7 +1570,7 @@ def fused_moe(
                                               topk, renormalize,
                                               num_expert_group, topk_group)
     elif custom_routing_function is None:
-        topk_weights, topk_ids = fused_topk(hidden_states, gating_output, topk,
+        topk_teights, topk_ids = fused_topk(hidden_states, gating_output, topk,
                                             renormalize)
     else:
         topk_weights, topk_ids = custom_routing_function(

@@ -47,9 +47,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         input_quant = quant_config.target_scheme_map["Linear"].get(
             "input_activations")
 
-        print(
-            f"CompressedTensorsMoEMethod::get_moe_method::quant_config = {quant_config}"
-        )
+        # print(
+            # f"CompressedTensorsMoEMethod::get_moe_method::quant_config = {quant_config}"
+        # )
         if quant_config._is_wNa16_group_channel(weight_quant, input_quant):
             return CompressedTensorsWNA16MoEMethod(quant_config)
         elif quant_config._is_fp8_w8a8(weight_quant, input_quant):
@@ -197,11 +197,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         for expert_id in range(layer.local_num_experts):
             start = 0
             for shard_id in range(2):
-                #NOTE: Need to check if this is working or not
                 dq_weight = per_tensor_dequantize(
                     layer.w13_weight[expert_id][start:start + shard_size, :],
                     layer.w13_weight_scale[expert_id][shard_id])
-                #NOTE: Weights are int8, so need to check if working as well.
                 layer.w13_weight[expert_id][
                     start:start + shard_size, :], _ = ops.scaled_fp8_quant(
                         dq_weight, max_w13_scales[expert_id])
@@ -269,8 +267,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         self.input_quant = self.quant_config.target_scheme_map["Linear"].get(
             "input_activations")
 
-        print(f"CompressedTensorsW8A8Int8MoEMethod:self.weight_quant.strategy = {self.weight_quant.strategy},"
-              f"self.input_quant.strategy = {self.input_quant.strategy}")
+        # print(f"CompressedTensorsW8A8Int8MoEMethod:self.weight_quant.strategy = {self.weight_quant.strategy},"
+              # f"self.input_quant.strategy = {self.input_quant.strategy}")
 
         supported_quantization_strategies = [QuantizationStrategy.CHANNEL,QuantizationStrategy.TENSOR]
         if not (self.weight_quant.strategy in supported_quantization_strategies
@@ -287,9 +285,9 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                        hidden_size: int, intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
 
-        print(
-            f"CompressedTensorsW8A8Int8MoEMethod::create_weights::type(self)={type(self)}"
-        )
+        # print(
+            # f"CompressedTensorsW8A8Int8MoEMethod::create_weights::type(self)={type(self)}"
+        # )
         params_dtype = torch.int8
 
         # WEIGHTS
@@ -322,10 +320,10 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
                                               requires_grad=False)
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
 
-        print(
-            f"hidden_size={hidden_size},"
-            f"intermediate_size_per_partition={intermediate_size_per_partition},"
-        )
+        # print(
+            # f"hidden_size={hidden_size},"
+            # f"intermediate_size_per_partition={intermediate_size_per_partition},"
+        # )
         w2_weight_scale = torch.nn.Parameter(torch.ones(num_experts,
                                                         hidden_size,
                                                         1,
@@ -356,7 +354,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             layer.w13_input_scale = None
             layer.w2_input_scale = None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module, name: str) -> None:
         # Fp8 moe kernels require a single activation scale.
         # We take the max of all the scales in case they differ.
         if self.static_input_scales:
@@ -379,22 +377,72 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         # We take the max then dequant and requant each expert.
         assert layer.w13_weight_scale is not None
         shard_size = layer.intermediate_size_per_partition
-        print(f"process_weights_after_loading:shard_size={shard_size}")
-        print(f"process_weights_after_loading:layer.w13_weight_scale.shape={layer.w13_weight_scale.shape}")
-        max_w13_scales = layer.w13_weight_scale.max(dim=1).values
-        print(f"process_weights_after_loading:max_w13_scales.shape={max_w13_scales.shape},")
-        print(f"process_weights_after_loading:layer.w13_weight.shape ={layer.w13_weight.shape},"
-              f"layer.w13_weight_scale.shape = {layer.w13_weight_scale.shape}")
+
+        # max_w13_scales = layer.w13_weight_scale.max(dim=1).values
+        max_w13_scales = torch.max(
+                layer.w13_weight_scale[:,:layer.intermediate_size_per_partition,:],
+                layer.w13_weight_scale[:,layer.intermediate_size_per_partition:,:]
+        )
+
+        if name == "model.layers.0.block_sparse_moe.experts":
+            print("="*15)
+            print(f"max_w13_scales.shape={max_w13_scales.shape}")
+            print(f"process_weights_after_loading:shard_size={shard_size}")
+            print(f"process_weights_after_loading:layer.w13_weight_scale.shape={layer.w13_weight_scale.shape}")
+            print(f"process_weights_after_loading:max_w13_scales.shape={max_w13_scales.shape},")
+            print(f"process_weights_after_loading:layer.w13_weight.shape ={layer.w13_weight.shape},"
+                  f"layer.w13_weight_scale.shape = {layer.w13_weight_scale.shape}")
+            print(f"layer.w13_weight_scale[0][0].shape={layer.w13_weight_scale[0][0].shape}")
+            print(f"layer.w13_weight_scale[:,:10,:]={layer.w13_weight_scale[:,:10,:]}")
+            weight = layer.w13_weight[0][:shard_size, :]
+            scales = layer.w13_weight_scale[0][:shard_size]
+            print(f"weight.shape = {weight.shape}, scales.shape = {scales.shape}")
+            expert_weight = weight * scales
+            print(f"***** BEFORE *****")
+            print(f"expert_weight = {expert_weight[:10,:10]}")
+            dq_weight = layer.w13_weight
         for expert_id in range(layer.local_num_experts):
+            # start = 0
             start = 0
             for shard_id in range(2):
-                dq_weight = per_tensor_dequantize(
-                    layer.w13_weight[expert_id][start:start + shard_size, :],
-                    layer.w13_weight_scale[expert_id][shard_id])
-                layer.w13_weight[expert_id][
-                    start:start + shard_size, :], _ = ops.scaled_fp8_quant(
-                        dq_weight, max_w13_scales[expert_id])
-                start += shard_size
+                end = start + shard_size
+                # print(f"start={start},end={end}")
+                # print(f"layer.w13_weight[expert_id].shape={layer.w13_weight[expert_id].shape}")
+                # expert_weight = layer.w13_weight[expert_id]
+                # expert_scale = layer.w13_weight_scale[expert_id]
+                # print(f"expert_weight[start:end,:].shape={expert_weight[start:end,:].shape}")
+                # print(f"expert_scale[start:end].shape = {expert_scale[start:end].shape}")
+                # print(f"layer.w13_weight[expert_id][start:end, :].shape={layer.w13_weight[expert_id][start:end, :].shape}")
+                # print(f"layer.w13_weight_scale[expert_id][start:end].shape={layer.w13_weight_scale[expert_id][start:end].shape}")
+                dq_weight = layer.w13_weight[expert_id][start:end, :] *\
+                            layer.w13_weight_scale[expert_id][start:end]
+                # dq_weight = layer.w13_weight[expert_id][start:end, :] *\
+                            # layer.w13_weight_scale[expert_id][start:end]
+                # print(f"dq_weight.shape={dq_weight.shape}")
+                # print(f"max_w13_scales={max_w13_scales}")
+                layer.w13_weight[expert_id][start:end, :]\
+                    = (dq_weight * (1.0 / max_w13_scales[expert_id])).round().clamp(-128,127).to(torch.int8)
+                # layer.w13_weight[expert_id][start:end, :], _, _ = \
+                    # ops.scaled_int8_quant(dq_weight, max_w13_scales[expert_id])
+
+
+                # dq_weight = per_tensor_dequantize(
+                    # layer.w13_weight[expert_id][start:start + shard_size, :],
+                    # layer.w13_weight_scale[expert_id][shard_id])
+                # layer.w13_weight[expert_id][
+                    # start:start + shard_size, :], _, _ = ops.scaled_int8_quant(
+                        # dq_weight, max_w13_scales[expert_id])
+                # start += shard_size
+                start = end
+        if name == "model.layers.0.block_sparse_moe.experts":
+            print(f"layer.w13_weight.weight[0,:10,:10]={layer.w13_weight[0,:10,:10]}")
+            print(f"layer.w13_weight.weight[1,:10,:10]={layer.w13_weight[1,:10,:10]}")
+            print(f"***** AFTER *****")
+            expert_weight = layer.w13_weight[0][:shard_size, :] *\
+                    layer.w13_weight_scale[0][:shard_size]
+            print(f"expert_weight = {expert_weight[:10,:10]}")
+            print("="*15)
+
 
         layer.w13_weight_scale = torch.nn.Parameter(max_w13_scales,
                                                     requires_grad=False)
@@ -419,7 +467,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
-        print(f"x.dtype={x.dtype}")
+        # print(f"x.dtype={x.dtype}")
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,

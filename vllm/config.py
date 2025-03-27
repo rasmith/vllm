@@ -1523,9 +1523,9 @@ class ParallelConfig:
             ray_utils.assert_ray_available()
         if current_platform.is_rocm():
             self.disable_custom_all_reduce = True
-            logger.info(
-                "Disabled the custom all-reduce kernel because it is not "
-                "supported on AMD GPUs.")
+            # logger.info(
+                # "Disabled the custom all-reduce kernel because it is not "
+                # "supported on AMD GPUs.")
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
@@ -3629,7 +3629,7 @@ def get_current_vllm_config() -> VllmConfig:
         # in ci, usually when we test custom ops/modules directly,
         # we don't set the vllm config. In that case, we set a default
         # config.
-        logger.warning("Current vLLM config is not set.")
+        # logger.warning("Current vLLM config is not set.")
         from vllm.config import VllmConfig
         return VllmConfig()
     return _current_vllm_config

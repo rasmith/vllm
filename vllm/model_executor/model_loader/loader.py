@@ -159,6 +159,7 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                    target_device: torch.device) -> None:
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
+        # print(f"_process_weights_after_loading: _ = {_}")
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
@@ -166,8 +167,15 @@ def _process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
-                print(f"_process_weights_after_loading:name = {_}")
-                quant_method.process_weights_after_loading(module)
+                from vllm.model_executor.layers.quantization.\
+                        compressed_tensors.compressed_tensors_moe \
+                        import CompressedTensorsW8A8Int8MoEMethod
+                # print(f"_process_weights_after_loading:name = {_}")
+                # print(f"_process_weights_after_loading:quant_method={quant_method}")
+                if isinstance(quant_method, CompressedTensorsW8A8Int8MoEMethod):
+                    quant_method.process_weights_after_loading(module, _)
+                else:
+                    quant_method.process_weights_after_loading(module)
 
     # Currently only used by MLA.
     # NOTE: This intentionally happens after other modules so we can easily
