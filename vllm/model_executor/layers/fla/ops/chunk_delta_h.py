@@ -10,6 +10,8 @@
 
 import torch
 
+from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -17,6 +19,10 @@ from .op import exp
 from .utils import use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
+
+IS_950 = current_platform.is_rocm() and on_gfx950
+
+NUM_STAGES_AUTO_TUNE = [2, 3, 4] if not IS_950 else [2, 3]
 
 
 @triton.heuristics(
@@ -33,7 +39,7 @@ NUM_WARPS = [2, 4, 8, 16]
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in NUM_STAGES_AUTO_TUNE
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
