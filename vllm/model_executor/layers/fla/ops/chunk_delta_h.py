@@ -10,8 +10,6 @@
 
 import torch
 
-from vllm.platforms import current_platform
-from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
@@ -19,10 +17,6 @@ from .op import exp
 from .utils import use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
-
-IS_950 = current_platform.is_rocm() and on_gfx950
-
-NUM_STAGES_AUTO_TUNE = [2, 3, 4] if not IS_950 else [2, 3]
 
 
 @triton.heuristics(
@@ -39,7 +33,7 @@ NUM_STAGES_AUTO_TUNE = [2, 3, 4] if not IS_950 else [2, 3]
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in NUM_STAGES_AUTO_TUNE
+        for num_stages in [2, 3, 4]
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
@@ -135,22 +129,42 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     # main recurrence
     for i_t in range(NT):
         p_h1 = tl.make_block_ptr(
-            h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
+            h + i_t.to(tl.int64) * stride_h,
+            (V, K),
+            (K, 1),
+            (i_v * BV, 0),
+            (BV, 64),
+            (1, 0),
         )
         tl.store(p_h1, b_h1.to(p_h1.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
             p_h2 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 64),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h2, b_h2.to(p_h2.dtype.element_ty), boundary_check=(0, 1))
         if K > 128:
             p_h3 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 128),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h3, b_h3.to(p_h3.dtype.element_ty), boundary_check=(0, 1))
         if K > 192:
             p_h4 = tl.make_block_ptr(
-                h + i_t * stride_h, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+                h + i_t.to(tl.int64) * stride_h,
+                (V, K),
+                (K, 1),
+                (i_v * BV, 192),
+                (BV, 64),
+                (1, 0),
             )
             tl.store(p_h4, b_h4.to(p_h4.dtype.element_ty), boundary_check=(0, 1))
 
@@ -188,9 +202,9 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             )
             tl.store(p_v, b_v.to(p_v.dtype.element_ty), boundary_check=(0, 1))
 
-        last_idx = min((i_t + 1) * BT, T) - 1
+        last_idx = min((i_t.to(tl.int64) + 1) * BT, T) - 1
         if USE_G:
-            m_t = (i_t * BT + tl.arange(0, BT)) < T
+            m_t = (i_t.to(tl.int64) * BT + tl.arange(0, BT)) < T
             b_g_last = tl.load(g + bos * H + last_idx * H + i_h)
             p_g = tl.make_block_ptr(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
