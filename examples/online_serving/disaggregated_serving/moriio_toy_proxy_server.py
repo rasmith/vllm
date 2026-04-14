@@ -132,7 +132,6 @@ async def send_request_to_prefill(
         }
         if selected_prefill_dp_rank is not None:
             headers["X-data-parallel-rank"] = str(selected_prefill_dp_rank)
-        )
         async with session.post(
             url=endpoint, json=req_data_copy, headers=headers
         ) as response:
@@ -173,9 +172,7 @@ async def stream_decode_response(session, response, request_id):
                 f"method={response.method}, url={response.url},"
                 f"real_url={response.real_url}"
             )
-            raise RuntimeError(
-                    error_message
-            )
+            raise RuntimeError(error_message)
     finally:
         await session.close()
 
