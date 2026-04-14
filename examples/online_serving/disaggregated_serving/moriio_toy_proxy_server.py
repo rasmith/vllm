@@ -162,19 +162,19 @@ async def start_decode_request(endpoint, req_data, request_id):
 
 
 async def stream_decode_response(session, response, request_id):
-    error_message = (
-        f"stream_decode_response response ={response},"
-        f"reason={response.reason}, status={response.status},"
-        f"method={response.method}, url={response.url},"
-        f"real_url={response.real_url}"
-    )
     try:
         if response.status == 200:
             async for chunk_bytes in response.content.iter_chunked(1024):
                 yield chunk_bytes
         else:
+            error_message = (
+                f"stream_decode_response response ={response},"
+                f"reason={response.reason}, status={response.status},"
+                f"method={response.method}, url={response.url},"
+                f"real_url={response.real_url}"
+            )
             raise RuntimeError(
-                f"decode response.status != 200, status = {response.status}"
+                    error_message
             )
     finally:
         await session.close()
