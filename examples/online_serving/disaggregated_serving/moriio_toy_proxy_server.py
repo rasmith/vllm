@@ -163,7 +163,7 @@ async def start_decode_request(endpoint, req_data, request_id):
 
 async def stream_decode_response(session, response, request_id):
     error_message = (
-        f"send_request_to_prefill response ={response},"
+        f"stream_decode_response response ={response},"
         f"reason={response.reason}, status={response.status},"
         f"method={response.method}, url={response.url},"
         f"real_url={response.real_url}"
