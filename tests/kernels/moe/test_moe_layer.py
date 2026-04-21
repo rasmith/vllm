@@ -1420,6 +1420,25 @@ def test_moe_layer_no_parallel(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
+    # This is needed during testing since the MoE layers will already be in
+    # fnuz format on fnuz machines.
+    if current_platform.is_fp8_fnuz():
+
+        def mock_normalize_e4m3fn_to_e4m3fnuz(
+            weight: torch.Tensor,
+            weight_scale: torch.Tensor,
+            input_scale: torch.Tensor | None = None,
+        ):
+            return weight, weight_scale, input_scale
+
+        import vllm.model_executor.layers.quantization.utils.w8a8_utils
+
+        monkeypatch.setattr(
+            vllm.model_executor.layers.quantization.utils.w8a8_utils,
+            "normalize_e4m3fn_to_e4m3fnuz",
+            mock_normalize_e4m3fn_to_e4m3fnuz,
+        )
+
     test_config = MoETestConfig(
         m,
         n,
