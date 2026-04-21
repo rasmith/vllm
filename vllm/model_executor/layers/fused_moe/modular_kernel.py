@@ -1012,6 +1012,12 @@ class FusedMoEKernelModularImpl:
     ):
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        print(f"=== FusedMoEPrepareAndFinalizeModular stack begin ====")
+        import traceback as tb
+        tb.print_stack()
+        print(f"=== FusedMoEPrepareAndFinalizeModular stack end ====")
+        print(f"self.fused_experts.quant_config.a1_scale={self.fused_experts.quant_config.a1_scale}")
+        print(f"self.fused_experts.quant_config.a1_scale.ndim={self.fused_experts.quant_config.a1_scale.ndim}")
         # Only accept shared experts if they can be run w/async.
         # The MoERunner/SharedExperts class will coordinate with the MK to ensure
         # that the SharedExperts are executed only once.
@@ -1124,6 +1130,7 @@ class FusedMoEKernelModularImpl:
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
             # TODO(lucas): enable in follow-up
+            print(f"_prepare:self.fused_experts.quant_config.a1_scale={self.fused_experts.quant_config.a1_scale}")
             assert not dbo_enabled()
 
             (
@@ -1142,6 +1149,8 @@ class FusedMoEKernelModularImpl:
                 self.fused_experts.quant_config,
                 defer_input_quant=self.fused_experts.expects_unquantized_inputs,
             )
+            print(f"_prepare:prepare_finalize={self.prepare_finalize}")
+            print(f"_prepare:a1q_scale={a1q_scale}")
         else:
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
@@ -1378,6 +1387,7 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input,
         )
 
+        print(f"modular_kernel:a1q_scale={a1q_scale}")
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
             a1q=a1q,

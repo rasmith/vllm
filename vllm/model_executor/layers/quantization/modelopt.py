@@ -906,10 +906,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale = layer.w13_input_scale
         w2_input_scale = layer.w2_input_scale
 
+        print(f"process_weights_after_loading:w13_input_scale.ndim={w13_input_scale.ndim},"
+              f"w13_input_scale.ndim={w13_input_scale.ndim}")
         # Per tensor kernels require single activation scale. Use the max.
         w13_input_scale, w2_input_scale = process_fp8_input_tensor_strategy_moe(
             w13_input_scale, w2_input_scale
         )
+        print(f"process_weights_after_loading:after strategy:w13_input_scale.ndim={w13_input_scale.ndim}")
         replace_parameter(layer, "w13_input_scale", w13_input_scale)
         replace_parameter(layer, "w2_input_scale", w2_input_scale)
 
@@ -924,6 +927,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             is_act_and_mul=self.moe.is_act_and_mul,
         )
 
+        print(f"process_weights_after_loading:w13_input_scale.ndim={w13_input_scale.ndim}")
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
             layer, w13, w2, w13_scale, w2_scale, w13_input_scale, w2_input_scale
@@ -935,6 +939,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
 
+        print(f"get_fused_moe_quant_config:w1_scale={w1_scale},"
+              f"w2_scale={w2_scale},a1_scale={a1_scale},a2_scale={a2_scale},"
+              f"a1_scale.ndim={a1_scale.ndim}")
+        import traceback as tb
+        print(f"==== get_fused_moe_quant_config: stack begin ====")
+        tb.print_stack()
+        print(f"==== get_fused_moe_quant_config: stack end ====")
         return make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             w1_scale=w1_scale,
@@ -1359,7 +1370,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             data=torch.empty(global_sf_num_experts, dtype=torch.float32),
             weight_loader=weight_loader,
         )
-        layer.register_parameter("w2_input_scale", w2_input_scale)
+        layer.register_parameter("w2_dnput_scale", w2_input_scale)
 
     def process_weights_after_loading(self, layer: FusedMoE) -> None:
         """

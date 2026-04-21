@@ -276,6 +276,7 @@ class FusedMoE(PluggableLayer):
         routed_input_transform: torch.nn.Module | None = None,
         zero_expert_type: str | None = None,
     ):
+        print(f"FusedMoE:__init__")
         super().__init__()
 
         self._routed_input_transform = routed_input_transform
@@ -501,6 +502,7 @@ class FusedMoE(PluggableLayer):
             )
 
         self.quant_config = quant_config
+        print(f"FUSED_MOE_INIT:vars={vars(self)}")
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
@@ -1268,6 +1270,7 @@ class FusedMoE(PluggableLayer):
             # This is checked by comparing the hidden_out dims of the
             # loaded_weight and the param.
             if "w13_weight_scale" in weight_name:
+                print(f"W13_WEIGHT_SCALE")
                 loaded_weight_hidden_out = loaded_weight.shape[-2]
                 param_hidden_out = param.data.shape[-2] * self.tp_size
                 if loaded_weight_hidden_out == param_hidden_out:

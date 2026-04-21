@@ -133,6 +133,7 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
+        print(f"_fp8_quantize:call scaled_fp8_quant:A_scale={A_scale}")
         # TODO(luka): use QuantFP8 custom op
         #  https://github.com/vllm-project/vllm/issues/20711
         A, A_scale = ops.scaled_fp8_quant(
@@ -254,6 +255,11 @@ def moe_kernel_quantize_input(
     is_fp4_scale_swizzled: bool = True,
     ocp_mx_scheme: str | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
+    print(f"moe_kernel_quantize_input:A_scale={A_scale}")
+    import traceback as tb
+    print(f"===== moe_kernel_quantize_input: stack begin =====")
+    tb.print_stack()
+    print(f"===== moe_kernel_quantize_input: stack end   =====")
     # Handle OCP MX scheme that requires QDQ (quantize-dequantize) for emulation
     if ocp_mx_scheme is not None:
         if ocp_mx_scheme in {"w_mxfp4", "w_mxfp4_a_mxfp4"}:
@@ -274,6 +280,7 @@ def moe_kernel_quantize_input(
         # activation quantization below.
 
     if quant_dtype == current_platform.fp8_dtype():
+        print(f"moe_kernel_quantize_input:quant_type is fp8:A_scale={A_scale}")
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)

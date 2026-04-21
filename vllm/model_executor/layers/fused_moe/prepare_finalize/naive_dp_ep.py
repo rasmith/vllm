@@ -19,6 +19,7 @@ def _quantize_and_setup_dispatch(
     defer_input_quant: bool = False,
 ) -> tuple[torch.Tensor, list[torch.Tensor] | None]:
     # Defer input quantization to the MoE kernel.
+    print(f"_quantize_and_setup_dispatch:defer_input_quant={defer_input_quant}")
     if defer_input_quant:
         a1q = a1
         a1q_scale = None
@@ -29,6 +30,11 @@ def _quantize_and_setup_dispatch(
             else quant_config.a1_scale
         )
 
+        print(f"_quantize_and_setup_dispatch:input_sf={input_sf},"
+              f"quant_config.a1_gscale={quant_config.a1_gscale},"
+              f"quant_config.use_nvfp4_w4a4={quant_config.use_nvfp4_w4a4},"
+              f"quant_config.a1_scale={quant_config.a1_scale}")
+        print(f"_quantize_and_setup_dispatch:quant_config.a1_scale.ndim={quant_config.a1_scale.ndim}")
         # NOTE: swizzling pads the scales to multiple of 128
         # which makes the scales tensor different shape than
         # the hidden states, breaking the A2A kernel. So, we
@@ -41,11 +47,15 @@ def _quantize_and_setup_dispatch(
             block_shape=quant_config.block_shape,
             is_fp4_scale_swizzled=False,
         )
+        print(f"_quantize_and_setup_dispatch:a1q={a1q},a1q_scale={a1q_scale}")
 
     # Skip gathering scales if we have static quantization
     # (the scale is a scalar, replicated on all ranks) or
     # if quantization is deferred.
     skip_gather_scales = a1q_scale is None or a1q_scale.ndim == 0
+    print(f"_quantize_and_setup_dispatch:a1q_scale={a1q_scale},"
+          f"a1q_scale.ndim={a1q_scale.ndim}")
+    print(f"_quantize_and_setup_dispatch:skip_gather_scales={skip_gather_scales}")
     scales = None if skip_gather_scales else [a1q_scale]
 
     return a1q, scales
@@ -130,7 +140,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             is_sequence_parallel=self.is_sequence_parallel,
             extra_tensors=scales,
         )
-
+        print(f"MoEPrepareAndFinalizeNaiveDPEPModular.prepare:scales={scales}")
         if scales is None:
             a1q, topk_weights, topk_ids = res
             a1q_scale = None
@@ -138,6 +148,7 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
             a1q, topk_weights, topk_ids, scales = res
             a1q_scale = _unwrap_scale_and_prepare_for_moe(scales, quant_config)
 
+        print(f"MoEPrepareAndFinalizeNaiveDPEPModular.prepare:aq1_scale={a1q_scale}")
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
     def finalize(

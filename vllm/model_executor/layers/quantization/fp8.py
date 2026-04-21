@@ -709,6 +709,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 dtype=torch.float32,
             )
         w13_weight_scale = torch.nn.Parameter(w13_scale_data, requires_grad=False)
+        print(f"create_weights:w13_weight_scale={w13_weight_scale}")
         w2_weight_scale = torch.nn.Parameter(w2_scale_data, requires_grad=False)
         # Note: name is weight_scale for tensor, weight_scale_inv for block.
         layer.register_parameter(f"w13_{self.weight_scale_name}", w13_weight_scale)

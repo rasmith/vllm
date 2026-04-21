@@ -567,14 +567,19 @@ def make_quant_config(
         return None, QuantizedWeights(w13_weight=w1, w2_weight=w2)
 
     if quantization == "fp8":
-        return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+        qf = Fp8Config(True), _quantize_fp8_halves(w1, w2)
+        print(f"make_quant_config:qf.a1_scale={qf.a1_scale}")
+        print(f"make_quant_config:qf.a1_scale.ndim={qf.a1_scale}")
+        return qf
 
     if quantization == "modelopt_fp8":
+        print(f"make_quant_config:modelopt_fp8")
         qw = _quantize_fp8_halves(w1, w2)
         # why?
         qw.w13_input_scale = torch.ones(
             num_experts, dtype=torch.float32, device=w1.device
         )
+        print(f"make_quant_config:w13_input_scale.ndim={qw.w13_input_scale.ndim}")
         # why?
         qw.w2_input_scale = torch.ones(
             num_experts, dtype=torch.float32, device=w2.device
@@ -585,6 +590,7 @@ def make_quant_config(
             kv_cache_quant_method=None,
             exclude_modules=[],
         )
+        # print(f"make_quant_config:quant_config.a1_scale={quant_config.a1_scale}")
         return quant_config, qw
 
     if quantization == "modelopt_fp4":
@@ -882,6 +888,7 @@ def make_fused_moe_layer(
     if routed_input_transform is not None:
         kwargs["routed_input_transform"] = routed_input_transform
 
+    print(f"make_fused_moe_layer:builder={builder}")
     layer = builder(
         num_experts=global_num_experts,
         top_k=top_k,
@@ -910,6 +917,7 @@ def make_fused_moe_layer(
         has_bias=has_bias,
         **kwargs,
     )
+    # print(f"make_fused_moe_layer:layer.a1_scale={layer.a1_scale}")
 
     for name, value in [
         ("w13_weight", qw.w13_weight),
@@ -922,11 +930,16 @@ def make_fused_moe_layer(
         ("w2_input_scale", qw.w2_input_scale),
     ]:
         if value is not None:
+            p = torch.nn.Parameter(value, requires_grad=False)
+            print(f"make_fused_moe_layer:name={name},p.ndim={p.ndim}")
             layer.register_parameter(
                 name, torch.nn.Parameter(value, requires_grad=False)
             )
+    print(f"make_fused_moe_layer:layer.w13_input_scale.ndim={layer.w13_input_scale.ndim}")
 
     layer.quant_method.process_weights_after_loading(layer)
+    # print(f"make_fused_moe_layer:layer.a1_scale={layer.a1_scale}")
+    # print(f"make_fused_moe_layer:vars={vars(layer)}")
 
     def _moe(
         hidden_states: torch.Tensor,
@@ -1536,101 +1549,107 @@ def _parallel_worker(
     verbosity: int,
     **kwargs,
 ) -> None:
-    set_random_seed(7)
+    import gc
+    gc.disable()
+    try:
+        set_random_seed(7)
 
-    total = 0
-    passed = 0
-    failed = 0
-    fail_ids = []
+        total = 0
+        passed = 0
+        failed = 0
+        fail_ids = []
 
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-    for test_config in test_configs:
-        cc = vllm_config.compilation_config
-        if "from_forward_context" in cc.static_forward_context:
-            del cc.static_forward_context["from_forward_context"]
-            cc.static_all_moe_layers.remove("from_forward_context")
+        for test_config in test_configs:
+            cc = vllm_config.compilation_config
+            if "from_forward_context" in cc.static_forward_context:
+                del cc.static_forward_context["from_forward_context"]
+                cc.static_all_moe_layers.remove("from_forward_context")
 
-        tp_rank = pgi.rank % test_config.tp_size
+            tp_rank = pgi.rank % test_config.tp_size
 
-        if verbosity > 0:
-            print(f"subtest: {test_config.id()}", end="")
-
-        try:
-            _run_one_config(
-                vllm_config,
-                test_config.ep_size,
-                test_config.dp_size,
-                test_config.tp_size,
-                dp_rank,
-                tp_rank,
-                test_config.m,
-                test_config.n,
-                test_config.k,
-                test_config.num_experts,
-                test_config.top_k,
-                test_config.quantization,
-                test_config.reduce_results,
-                test_config.backend,
-                functools.partial(
-                    _test_body_config, test_config=test_config, cpu_group=cpu_group
-                ),
-                use_shared_experts=test_config.use_shared_experts,
-                use_gate=test_config.use_gate,
-                use_routed_input_transform=test_config.use_routed_input_transform,
-            )
             if verbosity > 0:
-                print(" PASSED")
-            else:
-                print(".", end="")
-            passed = passed + 1
-        except Exception as ex:
-            fail_ids.append(test_config.id())
-            failed = failed + 1
-            if verbosity > 0:
-                traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED {ex.__class__}")
-            else:
-                print("F", end="")
-        finally:
-            # Note: for some reason DeepEP buffers don't seem to be
-            # entirely reusable on B200. In order to work around this
-            # we clear the all2all manager's cache after each testpoint.
-            cap = current_platform.get_device_capability()
-            if (
-                cap is not None
-                and cap.major == 10
-                and (
-                    test_config.backend == "deepep_low_latency"
-                    or test_config.backend == "deepep_high_throughput"
-                )
-            ):
-                torch.accelerator.synchronize()
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
-                if all2all_manager is not None:
-                    all2all_manager.destroy()
-            total = total + 1
+                print(f"subtest: {test_config.id()}", end="")
 
-    skipped = total - (passed + failed)
+            try:
+                if test_config.id() == "[222-2048-2048-64-6-bfloat16-modelopt_fp8-True-True-False-False-False-allgather_reducescatter-2-2-1]":
+                    _run_one_config(
+                        vllm_config,
+                        test_config.ep_size,
+                        test_config.dp_size,
+                        test_config.tp_size,
+                        dp_rank,
+                        tp_rank,
+                        test_config.m,
+                        test_config.n,
+                        test_config.k,
+                        test_config.num_experts,
+                        test_config.top_k,
+                        test_config.quantization,
+                        test_config.reduce_results,
+                        test_config.backend,
+                        functools.partial(
+                            _test_body_config, test_config=test_config, cpu_group=cpu_group
+                        ),
+                        use_shared_experts=test_config.use_shared_experts,
+                        use_gate=test_config.use_gate,
+                        use_routed_input_transform=test_config.use_routed_input_transform,
+                    )
+                    if verbosity > 0:
+                        print(" PASSED")
+                    else:
+                        print(".", end="")
+                    passed = passed + 1
+            except Exception as ex:
+                fail_ids.append(test_config.id())
+                failed = failed + 1
+                if verbosity > 0:
+                    traceback.print_exc()
+                    print(f"\n{str(ex)}\nFAILED {ex.__class__}")
+                else:
+                    print("F", end="")
+            finally:
+                # Note: for some reason DeepEP buffers don't seem to be
+                # entirely reusable on B200. In order to work around this
+                # we clear the all2all manager's cache after each testpoint.
+                cap = current_platform.get_device_capability()
+                if (
+                    cap is not None
+                    and cap.major == 10
+                    and (
+                        test_config.backend == "deepep_low_latency"
+                        or test_config.backend == "deepep_high_throughput"
+                    )
+                ):
+                    torch.accelerator.synchronize()
+                    all2all_manager = get_ep_group().device_communicator.all2all_manager
+                    if all2all_manager is not None:
+                        all2all_manager.destroy()
+                total = total + 1
 
-    fails = f"{failed} failed" if failed > 0 else ""
-    sep = ", " if fails != "" else ""
-    skips = f"{sep}{skipped} skipped" if skipped > 0 else ""
-    sep = ", " if skips != "" or fails != "" else ""
-    passes = f"{sep}{passed} passed" if passed > 0 else ""
+        skipped = total - (passed + failed)
 
-    report = (
-        f"============= {fails}{skips}{passes} of {total} total tests ============="
-    )
+        fails = f"{failed} failed" if failed > 0 else ""
+        sep = ", " if fails != "" else ""
+        skips = f"{sep}{skipped} skipped" if skipped > 0 else ""
+        sep = ", " if skips != "" or fails != "" else ""
+        passes = f"{sep}{passed} passed" if passed > 0 else ""
 
-    sep = "\n" if verbosity == 0 else ""
-    print(f"{sep}{report}")
-
-    if failed > 0:
-        fail_ids_str = "\n".join(fail_ids)
-        raise RuntimeError(
-            f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
+        report = (
+            f"============= {fails}{skips}{passes} of {total} total tests ============="
         )
+
+        sep = "\n" if verbosity == 0 else ""
+        print(f"{sep}{report}")
+
+        if failed > 0:
+            fail_ids_str = "\n".join(fail_ids)
+            raise RuntimeError(
+                f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
+            )
+    finally:
+        gc.enable()
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1700,6 +1719,7 @@ def test_moe_layer(
         backend, ep_size, dp_size, tp_size, enable_eplb, verbosity
     )
 
+    import gc
     if subtests is not None:
         new_test_configs = []
         for subtest in subtests.split(","):

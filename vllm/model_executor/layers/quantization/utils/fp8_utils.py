@@ -1136,6 +1136,7 @@ def process_fp8_input_tensor_strategy_moe(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Process moe input scales for tensor-wise quantization strategy."""
 
+    print(f"process_fp8_input_tensor_strategy_moe")
     if not all_close_1d(w13_input_scale) or not all_close_1d(w2_input_scale):
         logger.info_once(
             "Found input_scales that are not equal for "
@@ -1143,4 +1144,17 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    # return w13_input_scale.max(), w2_input_scale.max()
+    print(f"process_fp8_input_tensor_strategy_moe:type={type(w13_input_scale)}")
+    print(f"process_fp8_input_tensor_strategy_moe:device={w13_input_scale.device}")
+    device=w13_input_scale.device
+    w13_input_scale=torch.tensor([w13_input_scale.max()],device=device)
+    w13_input_scale=torch.nn.Parameter(w13_input_scale, requires_grad=False)
+    w2_input_scale=torch.tensor([w2_input_scale.max()],device=device)
+    w2_input_scale=torch.nn.Parameter(w2_input_scale, requires_grad=False)
+    # w13_input_scale=torch.nn.Parameter(w13_input_scale.max(),device=w13_input_scale.device)
+    # w2_input_scale=torch.nn.Parameter(w2_input_scale.max(),device=w2_input_scale.device)
+    # print(f"process_fp8_input_tensor_strategy_moe:w13_input_scale.ndim={w13_input_scale.ndim},"
+          # f"w2_input_scale.ndim={w2_input_scale.ndim}")
+    print(f"process_fp8_input_tensor_strategy_moe:w13_input_scale={w13_input_scale},w2_input_scale={w2_input_scale}")
+    return w13_input_scale, w2_input_scale

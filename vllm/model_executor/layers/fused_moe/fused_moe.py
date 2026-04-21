@@ -748,6 +748,10 @@ def invoke_fused_moe_triton_kernel(
     assert topk_weights is None or topk_weights.stride(1) == 1
     assert sorted_token_ids is None or sorted_token_ids.stride(0) == 1
 
+    print(f"use_fp8_w8a8 = {use_fp8_w8a8},"
+          f"use_int8_w8a8 = {use_int8_w8a8},"
+          f"use_int8_w8a16 = {use_int8_w8a16},"
+          f"use_int4_w4a16 = {use_int4_w4a16}")
     if use_fp8_w8a8 or use_int8_w8a8:
         assert B_scale is not None
         assert block_shape is None or triton.cdiv(
@@ -788,6 +792,7 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    print(f"A_scale={A_scale}")
     fused_moe_kernel[grid](
         A,
         B,
@@ -2077,6 +2082,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
         )
 
+        print(f"a1q_scale = {a1q_scale}")
         invoke_fused_moe_triton_kernel(
             hidden_states,
             w1,
