@@ -144,6 +144,8 @@ def mock_normalize_e4m3fn_to_e4m3fnuz(
 # Needed since weights will already be in e4m3fnuz format on platforms that
 # use the fnuz fp8 format and the normalize_e4m3fn_to_e4m3fnuz() function
 # is not being tested here.
+# NOTE: The weights are quantized by moe_quantize_weights_2d in
+# _quantize_fp8_halves.
 # NOTE: Not able to use monkeypatch because of the spawned parallel workers.
 def override_normalize_e4m3fn_to_e4m3fnuz():
     vllm.model_executor.layers.quantization.utils.w8a8_utils.normalize_e4m3fn_to_e4m3fnuz = mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
