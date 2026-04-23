@@ -60,6 +60,7 @@ from vllm.v1.worker.workspace import (
     init_workspace_manager,
     is_workspace_manager_initialized,
 )
+import gc
 
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
@@ -1478,6 +1479,8 @@ def _test_body_config(test_config: MoETestConfig, cpu_group, **kwargs):
         return _test_body_eplb(**kwargs, cpu_group=cpu_group)
 
 
+
+
 def _parallel_worker(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -1486,6 +1489,9 @@ def _parallel_worker(
     verbosity: int,
     **kwargs,
 ) -> None:
+    print(f"=================> PID = {os.getpid()}")
+    import time
+    # time.sleep(30)
     set_random_seed(7)
 
     total = 0
@@ -1506,59 +1512,62 @@ def _parallel_worker(
         if verbosity > 0:
             print(f"subtest: {test_config.id()}", end="")
 
-        try:
-            _run_one_config(
-                vllm_config,
-                test_config.ep_size,
-                test_config.dp_size,
-                test_config.tp_size,
-                dp_rank,
-                tp_rank,
-                test_config.m,
-                test_config.n,
-                test_config.k,
-                test_config.num_experts,
-                test_config.top_k,
-                test_config.quantization,
-                test_config.backend,
-                functools.partial(
-                    _test_body_config, test_config=test_config, cpu_group=cpu_group
-                ),
-                use_shared_experts=test_config.use_shared_experts,
-                use_gate=test_config.use_gate,
-                use_routed_input_transform=test_config.use_routed_input_transform,
-            )
-            if verbosity > 0:
-                print(" PASSED")
-            else:
-                print(".", end="")
-            passed = passed + 1
-        except Exception as ex:
-            fail_ids.append(test_config.id())
-            failed = failed + 1
-            if verbosity > 0:
-                traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED")
-            else:
-                print("F", end="")
-        finally:
-            # Note: for some reason DeepEP buffers don't seem to be
-            # entirely reusable on B200. In order to work around this
-            # we clear the all2all manager's cache after each testpoint.
-            cap = current_platform.get_device_capability()
-            if (
-                cap is not None
-                and cap.major == 10
-                and (
-                    test_config.backend == "deepep_low_latency"
-                    or test_config.backend == "deepep_high_throughput"
+        subtest_id="[1-128-256-64-6-bfloat16-modelopt_fp8-True-True-False-False-allgather_reducescatter-1-1-2]"
+        use_subtest_id = False
+        if not use_subtest_id or test_config.id() == subtest_id:
+            try:
+                _run_one_config(
+                    vllm_config,
+                    test_config.ep_size,
+                    test_config.dp_size,
+                    test_config.tp_size,
+                    dp_rank,
+                    tp_rank,
+                    test_config.m,
+                    test_config.n,
+                    test_config.k,
+                    test_config.num_experts,
+                    test_config.top_k,
+                    test_config.quantization,
+                    test_config.backend,
+                    functools.partial(
+                        _test_body_config, test_config=test_config, cpu_group=cpu_group
+                    ),
+                    use_shared_experts=test_config.use_shared_experts,
+                    use_gate=test_config.use_gate,
+                    use_routed_input_transform=test_config.use_routed_input_transform,
                 )
-            ):
-                torch.accelerator.synchronize()
-                all2all_manager = get_ep_group().device_communicator.all2all_manager
-                if all2all_manager is not None:
-                    all2all_manager.destroy()
-            total = total + 1
+                if verbosity > 0:
+                    print(" PASSED")
+                else:
+                    print(".", end="")
+                passed = passed + 1
+            except Exception as ex:
+                fail_ids.append(test_config.id())
+                failed = failed + 1
+                if verbosity > 0:
+                    traceback.print_exc()
+                    print(f"\n{str(ex)}\nFAILED")
+                else:
+                    print("F", end="")
+            finally:
+                # Note: for some reason DeepEP buffers don't seem to be
+                # entirely reusable on B200. In order to work around this
+                # we clear the all2all manager's cache after each testpoint.
+                cap = current_platform.get_device_capability()
+                if (
+                    cap is not None
+                    and cap.major == 10
+                    and (
+                        test_config.backend == "deepep_low_latency"
+                        or test_config.backend == "deepep_high_throughput"
+                    )
+                ):
+                    torch.accelerator.synchronize()
+                    all2all_manager = get_ep_group().device_communicator.all2all_manager
+                    if all2all_manager is not None:
+                        all2all_manager.destroy()
+                total = total + 1
 
     skipped = total - (passed + failed)
 
@@ -1580,6 +1589,21 @@ def _parallel_worker(
         raise RuntimeError(
             f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
         )
+
+def _parallel_worker_wrapper(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    test_configs: list[MoETestConfig],
+    verbosity: int,
+    **kwargs,
+):
+    try:
+        gc.disable()
+        _parallel_worker(pgi, vllm_config, cpu_group, test_configs, verbosity,
+                **kwargs)
+    finally:
+        gc.enable()
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1605,6 +1629,7 @@ def test_moe_layer(
     ep_size = 1 if not use_ep else world_size  # or dp_size?
     assert world_size > 1
 
+    print(f"dp_size={dp_size},tp_size={tp_size},use_ep={use_ep}")
     # Check if enough GPUs available
     if world_size is not None and num_gpus is not None and world_size > num_gpus:
         pytest.skip(f"Not enough GPUs got {num_gpus}, expected {world_size}.")
@@ -1612,11 +1637,21 @@ def test_moe_layer(
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
 
+    if current_platform.is_rocm() and backend=="deepep_low_latency" and use_ep:
+        pytest.skip("DeepEP with {backend} backend is not currently compatible")
+
     verbosity = pytestconfig.getoption("verbose")
 
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
+    if backend == "mori":
+        pytest.skip("AITER produces illegal memory access with MORI in these tests.")
+
+    if current_platform.is_rocm():
+        monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        if backend != "mori":
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     # TODO
     # VLLM_FLASHINFER_MOE_BACKEND=latency
     # VLLM_USE_FLASHINFER_MOE_FP16=1
@@ -1668,7 +1703,7 @@ def test_moe_layer(
     try:
         parallel_launch_with_config(
             world_size,
-            _parallel_worker,
+            _parallel_worker_wrapper,
             vllm_config,
             None,
             test_configs,

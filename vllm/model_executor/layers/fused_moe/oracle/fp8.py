@@ -261,6 +261,7 @@ def select_fp8_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
+        print(f"backends={list(backend_to_kernel_cls(backend))}")
         for k_cls in backend_to_kernel_cls(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
@@ -268,6 +269,10 @@ def select_fp8_moe_backend(
             if supported:
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
+            if not supported:
+                print(f"backend={backend}, config={config},"
+                      f"weight_key={weight_key},activation_key={activation_key},"
+                      f"activation_format={activation_format}")
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Handle explicit moe_backend from user.
