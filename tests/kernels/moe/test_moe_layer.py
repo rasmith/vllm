@@ -6,6 +6,7 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 """
 
 import functools
+import gc
 import os
 import traceback
 import types
@@ -16,7 +17,6 @@ from typing import get_args
 
 import pytest
 import torch
-import gc
 
 import vllm.model_executor.layers.quantization.utils.w8a8_utils
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
@@ -1655,6 +1655,7 @@ def _parallel_worker(
             f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
         )
 
+
 def _parallel_worker_wrapper(
     pgi: ProcessGroupInfo,
     vllm_config: VllmConfig,
@@ -1665,8 +1666,7 @@ def _parallel_worker_wrapper(
 ):
     try:
         gc.disable()
-        _parallel_worker(pgi, vllm_config, cpu_group, test_configs, verbosity,
-                **kwargs)
+        _parallel_worker(pgi, vllm_config, cpu_group, test_configs, verbosity, **kwargs)
     finally:
         gc.enable()
 
