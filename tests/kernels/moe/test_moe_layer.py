@@ -1512,62 +1512,59 @@ def _parallel_worker(
         if verbosity > 0:
             print(f"subtest: {test_config.id()}", end="")
 
-        subtest_id="[1-128-256-64-6-bfloat16-modelopt_fp8-True-True-False-False-allgather_reducescatter-1-1-2]"
-        use_subtest_id = False
-        if not use_subtest_id or test_config.id() == subtest_id:
-            try:
-                _run_one_config(
-                    vllm_config,
-                    test_config.ep_size,
-                    test_config.dp_size,
-                    test_config.tp_size,
-                    dp_rank,
-                    tp_rank,
-                    test_config.m,
-                    test_config.n,
-                    test_config.k,
-                    test_config.num_experts,
-                    test_config.top_k,
-                    test_config.quantization,
-                    test_config.backend,
-                    functools.partial(
-                        _test_body_config, test_config=test_config, cpu_group=cpu_group
-                    ),
-                    use_shared_experts=test_config.use_shared_experts,
-                    use_gate=test_config.use_gate,
-                    use_routed_input_transform=test_config.use_routed_input_transform,
+        try:
+            _run_one_config(
+                vllm_config,
+                test_config.ep_size,
+                test_config.dp_size,
+                test_config.tp_size,
+                dp_rank,
+                tp_rank,
+                test_config.m,
+                test_config.n,
+                test_config.k,
+                test_config.num_experts,
+                test_config.top_k,
+                test_config.quantization,
+                test_config.backend,
+                functools.partial(
+                    _test_body_config, test_config=test_config, cpu_group=cpu_group
+                ),
+                use_shared_experts=test_config.use_shared_experts,
+                use_gate=test_config.use_gate,
+                use_routed_input_transform=test_config.use_routed_input_transform,
+            )
+            if verbosity > 0:
+                print(" PASSED")
+            else:
+                print(".", end="")
+            passed = passed + 1
+        except Exception as ex:
+            fail_ids.append(test_config.id())
+            failed = failed + 1
+            if verbosity > 0:
+                traceback.print_exc()
+                print(f"\n{str(ex)}\nFAILED")
+            else:
+                print("F", end="")
+        finally:
+            # Note: for some reason DeepEP buffers don't seem to be
+            # entirely reusable on B200. In order to work around this
+            # we clear the all2all manager's cache after each testpoint.
+            cap = current_platform.get_device_capability()
+            if (
+                cap is not None
+                and cap.major == 10
+                and (
+                    test_config.backend == "deepep_low_latency"
+                    or test_config.backend == "deepep_high_throughput"
                 )
-                if verbosity > 0:
-                    print(" PASSED")
-                else:
-                    print(".", end="")
-                passed = passed + 1
-            except Exception as ex:
-                fail_ids.append(test_config.id())
-                failed = failed + 1
-                if verbosity > 0:
-                    traceback.print_exc()
-                    print(f"\n{str(ex)}\nFAILED")
-                else:
-                    print("F", end="")
-            finally:
-                # Note: for some reason DeepEP buffers don't seem to be
-                # entirely reusable on B200. In order to work around this
-                # we clear the all2all manager's cache after each testpoint.
-                cap = current_platform.get_device_capability()
-                if (
-                    cap is not None
-                    and cap.major == 10
-                    and (
-                        test_config.backend == "deepep_low_latency"
-                        or test_config.backend == "deepep_high_throughput"
-                    )
-                ):
-                    torch.accelerator.synchronize()
-                    all2all_manager = get_ep_group().device_communicator.all2all_manager
-                    if all2all_manager is not None:
-                        all2all_manager.destroy()
-                total = total + 1
+            ):
+                torch.accelerator.synchronize()
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                if all2all_manager is not None:
+                    all2all_manager.destroy()
+            total = total + 1
 
     skipped = total - (passed + failed)
 
