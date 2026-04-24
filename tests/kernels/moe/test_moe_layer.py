@@ -1564,9 +1564,6 @@ def _parallel_worker(
     verbosity: int,
     **kwargs,
 ) -> None:
-    print(f"=================> PID = {os.getpid()}")
-    import time
-    # time.sleep(30)
     set_random_seed(7)
 
     total = 0
