@@ -16,6 +16,7 @@ from typing import get_args
 
 import pytest
 import torch
+import gc
 
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
@@ -1581,6 +1582,21 @@ def _parallel_worker(
             f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
         )
 
+def _parallel_worker_wrapper(
+    pgi: ProcessGroupInfo,
+    vllm_config: VllmConfig,
+    cpu_group,
+    test_configs: list[MoETestConfig],
+    verbosity: int,
+    **kwargs,
+):
+    try:
+        gc.disable()
+        _parallel_worker(pgi, vllm_config, cpu_group, test_configs, verbosity,
+                **kwargs)
+    finally:
+        gc.enable()
+
 
 # TODO: add cudagraphs/torch.compile tests
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
@@ -1668,7 +1684,7 @@ def test_moe_layer(
     try:
         parallel_launch_with_config(
             world_size,
-            _parallel_worker,
+            _parallel_worker_wrapper,
             vllm_config,
             None,
             test_configs,
