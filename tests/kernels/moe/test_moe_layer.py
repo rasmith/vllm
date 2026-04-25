@@ -1631,8 +1631,10 @@ def _parallel_worker(
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
+                    print(f"RRRRRR all2all_manager = {all2all_manager}")
                     all2all_manager.destroy()
             total = total + 1
+            torch.distributed.barrier()
 
     skipped = total - (passed + failed)
 
@@ -1654,21 +1656,6 @@ def _parallel_worker(
         raise RuntimeError(
             f"\n============= Failed subtests =============\n{fail_ids_str}\n{report}"
         )
-
-
-def _parallel_worker_wrapper(
-    pgi: ProcessGroupInfo,
-    vllm_config: VllmConfig,
-    cpu_group,
-    test_configs: list[MoETestConfig],
-    verbosity: int,
-    **kwargs,
-):
-    try:
-        gc.disable()
-        _parallel_worker(pgi, vllm_config, cpu_group, test_configs, verbosity, **kwargs)
-    finally:
-        gc.enable()
 
 
 # TODO: add cudagraphs/torch.compile tests
@@ -1700,6 +1687,15 @@ def test_moe_layer(
 
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
+
+    # if current_platform.is_rocm():
+        # monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+        # if backend == "deepep_low_latency" and use_ep:
+            # pytest.skip("DeepEP with {backend} backend is not currently compatible")
+        # if backend == "mori":
+            # pytest.skip("AITER produces illegal memory access with MORI in these tests.")
+        # else:
+            # monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
 
     verbosity = pytestconfig.getoption("verbose")
 
@@ -1757,7 +1753,7 @@ def test_moe_layer(
     try:
         parallel_launch_with_config(
             world_size,
-            _parallel_worker_wrapper,
+            _parallel_worker,
             vllm_config,
             None,
             test_configs,
