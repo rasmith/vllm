@@ -1143,4 +1143,9 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max(), w2_input_scale.max()
+    device = w13_input_scale.device
+    w13_input_scale = torch.tensor([w13_input_scale.max()], device=device)
+    w13_input_scale = torch.nn.Parameter(w13_input_scale, requires_grad=False)
+    w2_input_scale = torch.tensor([w2_input_scale.max()], device=device)
+    w2_input_scale = torch.nn.Parameter(w2_input_scale, requires_grad=False)
+    return w13_input_scale, w2_input_scale
