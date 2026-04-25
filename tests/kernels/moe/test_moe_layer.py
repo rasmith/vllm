@@ -6,7 +6,6 @@ Run `pytest tests/kernels/test_moe_layer.py`.
 """
 
 import functools
-import gc
 import os
 import traceback
 import types
@@ -1631,7 +1630,6 @@ def _parallel_worker(
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
-                    print(f"RRRRRR all2all_manager = {all2all_manager}")
                     all2all_manager.destroy()
             total = total + 1
             torch.distributed.barrier()
