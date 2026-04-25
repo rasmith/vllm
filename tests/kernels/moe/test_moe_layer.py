@@ -1688,15 +1688,6 @@ def test_moe_layer(
     if enable_eplb and not use_ep:
         pytest.skip("EPLB requires EP.")
 
-    # if current_platform.is_rocm():
-        # monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
-        # if backend == "deepep_low_latency" and use_ep:
-            # pytest.skip("DeepEP with {backend} backend is not currently compatible")
-        # if backend == "mori":
-            # pytest.skip("AITER produces illegal memory access with MORI in these tests.")
-        # else:
-            # monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
-
     verbosity = pytestconfig.getoption("verbose")
 
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
