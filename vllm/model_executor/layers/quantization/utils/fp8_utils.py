@@ -1143,4 +1143,4 @@ def process_fp8_input_tensor_strategy_moe(
             "for each layer."
         )
 
-    return w13_input_scale.max().unsqueeze(0), w2_input_scale.max().unsqueeze(0)
+    return w13_input_scale.max(), w2_input_scale.max()
