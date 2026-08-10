@@ -119,8 +119,7 @@ steps:
   - tests/plugins_tests/gguf
   - vllm/platforms/rocm.py
   commands:
-  - pip install "vllm-gguf-plugin >= 0.0.2"
-  - curl -sL https://github.com/vllm-project/vllm-gguf-plugin/commit/c85f06e7b04d90fa6bd6028af4d7d305384a221a.patch | patch -d $(python3 -c "import site;print(site.getsitepackages()[0])") -p1
+  - pip install "vllm-gguf-plugin == 0.0.5"
   - pytest -v -s plugins_tests/gguf
 
 #-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
