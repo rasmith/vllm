@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ubuntu:22.04
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:latest
 ARG PYTHON_VERSION=3.12
 ARG TORCH_VERSION=2.12.0+rocm7.14.0
 ARG TORCHVISION_VERSION=0.27.0+rocm7.14.0
@@ -14,7 +14,7 @@ ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL=https://repo.amd.com/rocm/whl-multi-arch/ # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/torch/ # For torch, triton, etc. wheels with latest fixes.
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL=https://rocm.nightlies.amd.com/whl-multi-arch/ # For torch, triton, etc. wheels with latest fixes.
 ARG ROCM_SDK_VERSION=7.14.0
 
 # Build configuration
@@ -107,7 +107,7 @@ RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.vers
 # For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
 # PyTorch needs to run on that specific chip.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" | sed 's/a[0-9]\{8\}$//') \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
