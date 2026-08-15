@@ -79,8 +79,11 @@ RUN apt-get update && apt-get install -y libjpeg-dev libsox-dev libsox-fmt-all s
 
 # Install ROCm SDK via TheRock
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 ARG ROCM_SDK_VERSION
-RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+RUN pip install \
+    --index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+    --extra-index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
@@ -107,10 +110,12 @@ RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.vers
 # For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
 # PyTorch needs to run on that specific chip.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)" | sed 's/a[0-9]\{8\}$//') \
+RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
     && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
-        && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
+        && pip install \
+            --index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
+            --extra-index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
             amd-torch-device-${arch}==${TORCH_VER} \
             rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
     done
