@@ -190,10 +190,16 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
+# Version the wheel as the triton torch pins, else resolvers "repair" the env
+# with CUDA torch. release* branches drop the git suffix, so the env var sets it.
 RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
+    && git checkout -B release/internal/3.7.x ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && if [ ! -f setup.py ]; then cd python; fi \
+    && export TRITON_WHEEL_VERSION_SUFFIX="$(grep -m1 '^Requires-Dist: triton==' \
+        ${SITE_PACKAGES}/torch-*.dist-info/METADATA | sed 's/.*triton==[0-9.]*//')" \
+    && echo "TRITON_WHEEL_VERSION_SUFFIX=${TRITON_WHEEL_VERSION_SUFFIX}" \
+    && test -n "${TRITON_WHEEL_VERSION_SUFFIX}" \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
 
@@ -282,11 +288,12 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
-# Other wheels first, while torch still matches the triton it pins -- breaking
-# that pin early makes pip pull a CUDA torch from PyPI. Ours goes in last.
+# Our triton wheel carries the version torch pins, so it installs in place
+# without breaking the pin. --no-deps keeps pip off PyPI for torch.
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install $(ls /install/*.whl | grep -v '/triton-') \
     && pip install --no-deps --force-reinstall /install/triton-*.whl \
+    && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
