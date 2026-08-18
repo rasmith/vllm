@@ -282,15 +282,14 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
-# The torch nightly wheel bundles its own triton and pins it exactly
-# (Requires-Dist: triton==<ver>+git<sha>.rocm<ver>), and that local version
-# sorts above our source-built plain 3.7.1. Uninstall it, then install our
-# triton wheel with --no-deps so pip cannot pull the pinned nightly back down
-# over the top of it. The remaining wheels install normally, with deps.
+# Torch pins its own bundled triton exactly, so install ours with --no-deps to
+# keep the resolver from pulling that build back down. Other wheels take deps.
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip uninstall -y triton \
     && pip install --no-deps /install/triton-*.whl \
-    && pip install $(ls /install/*.whl | grep -v '/triton-')
+    && pip install $(ls /install/*.whl | grep -v '/triton-') \
+    && python3 -c "import triton; print(f'triton={triton.__version__}')" \
+    && pip list 2>/dev/null | grep -i '^triton '
 
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
