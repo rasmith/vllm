@@ -282,14 +282,14 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
-# Torch pins its own bundled triton exactly, so install ours with --no-deps to
-# keep the resolver from pulling that build back down. Other wheels take deps.
+# Other wheels first, while torch still matches the triton it pins -- breaking
+# that pin early makes pip pull a CUDA torch from PyPI. Ours goes in last.
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip uninstall -y triton \
-    && pip install --no-deps /install/triton-*.whl \
-    && pip install $(ls /install/*.whl | grep -v '/triton-') \
+    pip install $(ls /install/*.whl | grep -v '/triton-') \
+    && pip install --no-deps --force-reinstall /install/triton-*.whl \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
-    && pip list 2>/dev/null | grep -i '^triton '
+    && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
