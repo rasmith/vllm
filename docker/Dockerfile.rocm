@@ -840,6 +840,16 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
+# Recompute the base's triton fingerprint. A mismatch means a resolver replaced
+# our ROCm triton -- which is how a CUDA torch gets pulled in from PyPI.
+RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && ACTUAL=$(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && echo "triton sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')"
+
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 ARG NIC_BACKEND
