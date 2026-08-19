@@ -937,6 +937,21 @@ RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
     && test "${EXPECTED}" = "${ACTUAL}" \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')"
 
+# Same idea for pybind11. aiter JIT-compiles ~100 PYBIND11_MODULE sources at
+# runtime against these headers; a bump from 3.0.x to 3.1.0 flips the internals
+# version 11 -> 12, and the JIT modules then can't talk to aiter's prebuilt .so.
+RUN EXPECTED=$(grep '^PYBIND11_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && EXPECTED_ABI=$(grep '^PYBIND11_INTERNALS_VERSION: ' /app/versions.txt | cut -d' ' -f2) \
+    && INC=$(python3 -c 'import pybind11; print(pybind11.get_include())') \
+    && ACTUAL=$(find "${INC}" -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && ACTUAL_ABI=$(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' "${INC}" | awk '{print $NF}') \
+    && echo "pybind11 $(pip show pybind11 | awk '/^Version:/ {print $2}')" \
+        "sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+        "internals expected=${EXPECTED_ABI} actual=${ACTUAL_ABI}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && test "${EXPECTED_ABI}" = "${ACTUAL_ABI}"
+
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
 ARG NIC_BACKEND
