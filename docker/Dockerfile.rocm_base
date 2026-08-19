@@ -309,6 +309,14 @@ lines = pathlib.Path(rec).read_text().splitlines();\
 out = [f'{key},sha256={digest},{len(raw)}' if l.split(',')[0] == key else l for l in lines];\
 pathlib.Path(rec).write_text('\n'.join(out) + '\n')" \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
+    # Pin the ROCm stack for downstream resolvers to consume via -c; a transitive
+    # torch dep otherwise resolves to the CUDA build on PyPI. Use pip list, not
+    # pip freeze: freeze reports locally-installed wheels as `name @ file://...`,
+    # which a constraints file rejects.
+    && pip list --format=freeze \
+        | grep -E '^(torch|triton|torchaudio|torchvision)==' > /etc/rocm-constraints.txt \
+    && echo "ROCm constraints:" && cat /etc/rocm-constraints.txt \
+    && test "$(wc -l < /etc/rocm-constraints.txt)" -eq 4 \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '

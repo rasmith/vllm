@@ -285,8 +285,10 @@ COPY --from=fetch_vllm \
     ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
     requirements/
 
+# -c holds the base's ROCm torch/triton; a transitive torch dep here otherwise
+# resolves to the CUDA build on PyPI and the native build then fails to find HIP.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/rocm.txt
+    uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt
 
 # Fetch only the pinned ROCm Triton kernels package. Keeping this before the
 # vLLM source COPYs makes the download reusable when native sources change.
@@ -487,11 +489,6 @@ RUN cd /opt/nixl && \
         /tmp/nixl_wheels/repaired/*.whl && \
     cp /tmp/nixl_wheels/repaired/*.whl /app/install
 
-<<<<<<< HEAD
-# ROCShmem is provided by TheRock SDK (rocm[libraries,devel]) — no from-source
-# build needed. ROCSHMEM_DIR points to the SDK install path so DeepEP can find
-# the headers, static lib, and device bitcode.
-=======
 # Fetch and verify pinned LMCache source.
 FROM base AS lmcache_source
 ARG LMCACHE_REPO="https://github.com/LMCache/LMCache.git"
@@ -557,14 +554,11 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
         exit 1; \
     fi
 
-# ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
-# invalidate the slow ROCShmem build.
->>>>>>> main
-FROM base AS build_rocshmem
+# DeepEP build stage. ROCShmem is provided by TheRock SDK
+# (rocm[libraries,devel]) -- no from-source build needed. ROCSHMEM_DIR points at
+# the SDK install path so DeepEP finds the headers, static lib, and bitcode.
+FROM base AS build_deepep
 ENV ROCSHMEM_DIR=${ROCM_PATH}
-
-# DeepEP build stage - uses TheRock-provided ROCShmem.
-FROM build_rocshmem AS build_deepep
 ARG DEEPEP_BRANCH="0f63d3e9"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
@@ -812,7 +806,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
+    uv pip install --system -c /etc/rocm-constraints.txt \
+        -r /tmp/ci-base-requirements/rocm.txt \
     && rm -rf /tmp/ci-base-requirements
 
 # Enable fast and less brittle model downloads in tests.
@@ -924,9 +919,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system -c /etc/rocm-constraints.txt *.whl
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
