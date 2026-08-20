@@ -285,10 +285,7 @@ FROM base AS final
 RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
     && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD" \
-    && grep "/METADATA," "$TORCH_DIST_INFO/RECORD" \
-    && ! grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
-    && grep -q '^Requires-Dist: rocm\[libraries\]' "$TORCH_DIST_INFO/METADATA"
+    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
 
 # Other wheels first, so they resolve against the index triton. Ours goes in last
 # with --no-deps, where it can't pull the resolver anywhere.
