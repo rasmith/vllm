@@ -192,13 +192,10 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
-# Build TRITON_BRANCH directly, as upstream does. The wheel gets stamped
-# "3.7.1+git<sha>"; the final stage drops torch's triton pin so that is fine.
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
-    && ls dist/*.whl \
     && mkdir -p /app/install && cp dist/*.whl /app/install
 
 
@@ -240,13 +237,9 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 ###
 ### AITER Fetch
 ###
-# Prebuilt wheel instead of a source build. Downloaded (not installed) so the
-# stage still hands a .whl to /app/install, the way the build stage did.
-#
-# --find-links, not --index-url: the index serves the project only at the
-# literal "amd_aiter/" path, but PEP 503 has pip normalize the name and request
-# "amd-aiter/", which 403s. Pointing straight at the project page sidesteps the
-# name lookup entirely.
+# Install via wheels. Need --find-links since the wheel is under directory
+# amd_aiter instead of amd-aiter and due to PEP 503, pip will not find it
+# using --index-url.
 FROM base AS build_aiter
 ARG AITER_VERSION
 ARG ROCM_FRAMEWORKS_NIGHTLY_WHEELS_MULTIARCH_URL
@@ -284,13 +277,14 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
 FROM base AS final
-# Drop torch's triton pin: release wheels pin an exact local version that nothing
-# we build can satisfy. Upstream builds torch from source and gets no pin at all.
+
+# Remove the torch wheel's Requires-Dist: triton entry in METADATA and the SHA
+# hash (its optional) from RECORD.  These will cause Python to reinstall
+# Triton and a constraints file can't fix it. This doesn't exist for source 
+# builds, so it wasn't needed there.
 RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
     && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    # RECORD holds METADATA's now-stale sha256. Hash and size are optional per
-    # PEP 376, so blank them; the .pyc entries alongside already ship that way.
     && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD" \
     && grep "/METADATA," "$TORCH_DIST_INFO/RECORD" \
     && ! grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
@@ -303,13 +297,11 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && pip install --no-deps --force-reinstall /install/triton-*.whl \
     # With the pin gone this must be clean, so any complaint is real.
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
-    # Pin the ROCm stack for downstream -c use, else a transitive torch dep pulls
-    # CUDA torch. Use pip list: freeze emits `name @ file://...`, rejected by -c.
+    # Create a constraints file to protect the versions we need, especially
+    # triton, requirements will try to reinstall repeatedly.
     && pip list --format=freeze \
         | grep -E '^(torch|triton|torchaudio|torchvision|pybind11)==' > /etc/rocm-constraints.txt \
     && echo "ROCm constraints:" && cat /etc/rocm-constraints.txt \
-    # Pybind11: aiter JIT-builds against it and asks only >=3.0.1, so a bump to
-    # 3.1.0 emits internals v12 against its prebuilt v11 .so files.
     && test "$(wc -l < /etc/rocm-constraints.txt)" -eq 5 \
     && grep -q '^pybind11==3\.0\.' /etc/rocm-constraints.txt \
     && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')" \
@@ -329,6 +321,7 @@ ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_VERSION
+# Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
@@ -349,8 +342,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
         -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
         >> /app/versions.txt \
-    # Same for pybind11: aiter JIT-compiles against these headers at runtime, so an
-    # upgrade past 3.0.x flips the internals version and breaks its prebuilt .so.
     && echo "PYBIND11_VERSION: $(pip show pybind11 | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "PYBIND11_INTERNALS_VERSION: $(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' \
         $(python3 -c 'import pybind11; print(pybind11.get_include())') | awk '{print $NF}')" \
