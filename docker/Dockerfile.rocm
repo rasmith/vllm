@@ -925,6 +925,14 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
 
+# Recompute the base's torch fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^TORCH_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && ACTUAL=$(find $(python3 -c 'import torch, os; print(os.path.dirname(torch.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && echo "torch sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}"
+
 # Recompute the base's triton fingerprint to detect resolver interference.
 RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
     && ACTUAL=$(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \

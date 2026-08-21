@@ -1,13 +1,22 @@
 ARG BASE_IMAGE=ubuntu:22.04 #rocm/dev-ubuntu-22.04:latest
 ARG PYTHON_VERSION=3.12
-ARG TORCH_VERSION=2.12.0+rocm7.14.0
-ARG TORCHVISION_VERSION=0.27.0+rocm7.14.0
-ARG TORCHAUDIO_VERSION=2.11.0+rocm7.14.0
+# Full SHAs, not abbreviations: TheRock's checkout does git fetch origin <ref>,
+# which the server can only resolve for a complete object name.
 ARG TRITON_BRANCH="f0b55c07da61c71775bef6d1a15ebf846430ac75" # release/internal/3.7.x as of 08/13
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG PYTORCH_BRANCH="6bbd26020da1c6dc198625dfcdd968b1e4e6b1c5" # release/2.12 as of 08/02
+ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG PYTORCH_VISION_BRANCH="v0.27.1"
+ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
+ARG PYTORCH_AUDIO_BRANCH="v2.11.0"
+ARG PYTORCH_AUDIO_REPO="https://github.com/pytorch/audio.git"
+# TheRock drives the torch/triton/vision/audio builds against the pip-wheel SDK.
+ARG THEROCK_BRANCH="c6ebfdcd5cd1f98a3aefdc6fdfdbfc85cd92cbac" # main as of 07/22
+ARG THEROCK_REPO="https://github.com/ROCm/TheRock.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_VERSION="0.1.19.post3+rocm7.14.0.a63ede7"
+ARG AITER_BRANCH="v0.1.19"
+ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
@@ -22,6 +31,7 @@ ARG ROCM_SDK_VERSION=7.14.0
 # Build configuration
 ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
+ARG MAX_JOBS
 
 # Sccache configuration (only used in release pipeline)
 ARG USE_SCCACHE
@@ -37,6 +47,8 @@ ARG PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH="${PYTORCH_ROCM_ARCH}"
 ARG AITER_ROCM_ARCH
 ENV AITER_ROCM_ARCH="${AITER_ROCM_ARCH}"
+ARG MAX_JOBS
+ENV MAX_JOBS="${MAX_JOBS}"
 
 ARG SITE_PACKAGES
 ENV SITE_PACKAGES=${SITE_PACKAGES}
@@ -60,16 +72,16 @@ RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install Python and other dependencies
+# Install Python and other dependencies (plus gcc-13, selected later in build_therock).
 RUN apt-get update -y \
     && apt-get install -y software-properties-common build-essential git curl sudo vim less libgfortran5 libopenmpi-dev libpci-dev liblzma-dev pkg-config libdrm-dev libnuma-dev kmod \
     && for i in 1 2 3; do \
-        add-apt-repository -y ppa:deadsnakes/ppa && break || \
+        add-apt-repository -y ppa:deadsnakes/ppa && add-apt-repository -y ppa:ubuntu-toolchain-r/test && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
     && apt-get update -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
-       python${PYTHON_VERSION}-lib2to3 python-is-python3 \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3 gcc-13 g++-13 \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
@@ -88,40 +100,22 @@ RUN pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels (nightly for latest torch, release as fallback)
-ARG TORCH_VERSION
-ARG TORCHAUDIO_VERSION
-ARG TORCHVISION_VERSION
-RUN pip install \
-    --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-    --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-    "torch==${TORCH_VERSION}" \
-    "torchaudio==${TORCHAUDIO_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}"
-RUN python3 -c "import torch; print(f'torch={torch.__version__}, hip={torch.version.hip}')"
-
-# Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
+# Install the ROCm device code corresponding to PYTORCH_ROCM_ARCH:
 
 # Possible values that can be in PYTORCH_ROCM_ARCH:
 #
 # gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
 # gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
 
-# For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
-# PyTorch needs to run on that specific chip.
+# Torch is built from source in build_therock, so its device code is already
+# baked into that wheel and only the SDK's per-arch packages are needed here.
 SHELL ["/bin/bash", "-c"]
-RUN TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
-    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
+RUN for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
             --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-            amd-torch-device-${arch}==${TORCH_VER} \
             rocm-sdk-device-${arch}==${ROCM_SDK_VERSION}; \
     done
-
-# Remove gfx90a xnack kpacks (ASAN artifacts that cause hipErrorInvalidImage on MI250)
-RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
-         "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
 
 RUN cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
@@ -186,17 +180,63 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 
 ###
-### Triton Build
+### TheRock build
 ###
-FROM base AS build_triton
+# Triton, torch, torchvision and torchaudio are built together by TheRock, which
+# knows how to point them at the pip-wheel SDK. Torch only enables its aotriton
+# flash attention when triton is built in the same invocation.
+FROM base AS build_therock
+ARG THEROCK_BRANCH
+ARG THEROCK_REPO
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && mkdir -p /app/install && cp dist/*.whl /app/install
+ARG PYTORCH_BRANCH
+ARG PYTORCH_REPO
+ARG PYTORCH_VISION_BRANCH
+ARG PYTORCH_VISION_REPO
+ARG PYTORCH_AUDIO_BRANCH
+ARG PYTORCH_AUDIO_REPO
+ARG USE_SCCACHE
+
+# torch 2.12 emits float->__bf16 libcalls (__truncsfbf2) absent from gcc-11 libgcc; build with gcc-13.
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 130 --slave /usr/bin/g++ g++ /usr/bin/g++-13
+
+RUN git clone --filter=blob:none --no-checkout ${THEROCK_REPO} therock \
+    && cd therock && git checkout ${THEROCK_BRANCH}
+WORKDIR /app/therock
+RUN pip install -r external-builds/pytorch/requirements-ci.txt
+
+# TheRock's repo scripts clone and run HIPIFY. The pins are passed explicitly so
+# they win over the related_commits defaults in the torch checkout.
+WORKDIR /app/therock/external-builds/pytorch
+RUN python3 pytorch_torch_repo.py checkout --checkout-dir /app/pytorch \
+    --gitrepo-origin ${PYTORCH_REPO} --repo-hashtag ${PYTORCH_BRANCH} \
+    --no-commit-hipify
+RUN python3 pytorch_triton_repo.py checkout --checkout-dir /app/triton \
+    --torch-dir /app/pytorch \
+    --gitrepo-origin ${TRITON_REPO} --repo-hashtag ${TRITON_BRANCH} \
+    --no-commit-hipify
+RUN python3 pytorch_vision_repo.py checkout --checkout-dir /app/vision \
+    --torch-dir /app/pytorch \
+    --gitrepo-origin ${PYTORCH_VISION_REPO} --repo-hashtag ${PYTORCH_VISION_BRANCH} \
+    --no-commit-hipify
+RUN python3 pytorch_audio_repo.py checkout --checkout-dir /app/audio \
+    --torch-dir /app/pytorch \
+    --gitrepo-origin ${PYTORCH_AUDIO_REPO} --repo-hashtag ${PYTORCH_AUDIO_BRANCH} \
+    --no-commit-hipify
+
+# Built the way TheRock's own CI builds, only the checkouts are ours. One
+# invocation so torch sees triton and turns on its aotriton flash attention.
+# --use-sccache sets HIP_CLANG_LAUNCHER, which caches device code too.
+RUN python3 build_prod_wheels.py build \
+        --output-dir /app/install \
+        --pytorch-dir /app/pytorch --triton-dir /app/triton \
+        --pytorch-vision-dir /app/vision --pytorch-audio-dir /app/audio \
+        --pytorch-rocm-arch "${PYTORCH_ROCM_ARCH}" \
+        --no-build-apex \
+        $([ "$USE_SCCACHE" = "1" ] && echo --use-sccache) \
+    && python3 sanity_check_wheel.py /app/install/
+WORKDIR /app
 
 
 ###
@@ -205,6 +245,8 @@ RUN cd triton \
 FROM base AS build_mori
 ARG MORI_BRANCH
 ARG MORI_REPO
+RUN --mount=type=bind,from=build_therock,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN git clone ${MORI_REPO}
 RUN cd mori \
     && git checkout ${MORI_BRANCH} \
@@ -221,6 +263,8 @@ FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
 ARG USE_SCCACHE
+RUN --mount=type=bind,from=build_therock,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN git clone ${FA_REPO}
 RUN cd flash-attention \
     && git checkout ${FA_BRANCH} \
@@ -235,19 +279,29 @@ RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
 
 ###
-### AITER Fetch
+### AITER Build
 ###
-# Install via wheels. Need --find-links since the wheel is under directory
-# amd_aiter instead of amd-aiter and due to PEP 503, pip will not find it
-# using --index-url.
 FROM base AS build_aiter
-ARG AITER_VERSION
-ARG ROCM_FRAMEWORKS_NIGHTLY_WHEELS_MULTIARCH_URL
-RUN mkdir -p /app/install \
-    && pip download --no-deps --dest /app/install --no-index \
-        --find-links ${ROCM_FRAMEWORKS_NIGHTLY_WHEELS_MULTIARCH_URL}amd_aiter/ \
-        "amd_aiter==${AITER_VERSION}" \
-    && ls /app/install/*.whl
+ARG AITER_BRANCH
+ARG AITER_REPO
+ARG USE_SCCACHE
+RUN --mount=type=bind,from=build_therock,src=/app/install/,target=/install \
+    pip install /install/*.whl
+RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
+RUN cd aiter \
+    && git submodule update --init --recursive \
+    && pip install -r requirements.txt
+# AITER_USE_SYSTEM_TRITON keeps setup.py off the index triton, which would
+# otherwise displace the one we built.
+RUN pip install pyyaml && cd aiter \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export HIP_CLANG_PATH=/opt/sccache-wrappers \
+           && sccache --show-stats; \
+       fi \
+    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi \
+    && ls /app/aiter/dist/*.whl
+RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
@@ -258,7 +312,7 @@ RUN mkdir -p /app/install \
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+RUN --mount=type=bind,from=build_therock,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
@@ -267,7 +321,7 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 
 FROM base AS debs
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+RUN --mount=type=bind,from=build_therock,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
@@ -278,21 +332,11 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 
 FROM base AS final
 
-# Remove the torch wheel's Requires-Dist: triton entry in METADATA and the SHA
-# hash (its optional) from RECORD.  These will cause Python to reinstall
-# Triton and a constraints file can't fix it. This doesn't exist for source 
-# builds, so it wasn't needed there.
-RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
-    && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
-
-# Other wheels first, so they resolve against the index triton. Ours goes in last
-# with --no-deps, where it can't pull the resolver anywhere.
+# Torch pins the triton built alongside it, so the sibling wheel satisfies it and
+# the resolver never reaches for the index.
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install $(ls /install/*.whl | grep -v '/triton-') \
-    && pip install --no-deps --force-reinstall /install/triton-*.whl \
-    # With the pin gone this must be clean, so any complaint is real.
+    pip install /install/*.whl \
+    # Nothing is being worked around here, so any complaint is real.
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     # Create a constraints file to protect the versions we need, especially
     # triton, requirements will try to reinstall repeatedly.
@@ -305,36 +349,62 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
+# No METADATA surgery is needed now, but assert the reason why: a mismatch here
+# would send the resolver to the index and undo our triton.
+RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
+    && PINNED=$(sed -n 's/^Requires-Dist: triton==//p' "$TORCH_DIST_INFO/METADATA") \
+    && INSTALLED=$(pip show triton | awk '/^Version:/ {print $2}') \
+    && echo "torch pins triton==${PINNED}, installed ${INSTALLED}" \
+    && test "${PINNED}" = "${INSTALLED}"
+
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
 ARG ROCM_SDK_VERSION
-ARG TORCH_VERSION
-ARG TORCHAUDIO_VERSION
-ARG TORCHVISION_VERSION
+ARG PYTORCH_BRANCH
+ARG PYTORCH_REPO
+ARG PYTORCH_VISION_BRANCH
+ARG PYTORCH_VISION_REPO
+ARG PYTORCH_AUDIO_BRANCH
+ARG PYTORCH_AUDIO_REPO
+ARG THEROCK_BRANCH
+ARG THEROCK_REPO
 ARG PYTORCH_ROCM_ARCH
 ARG AITER_ROCM_ARCH
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 ARG FA_BRANCH
 ARG FA_REPO
-ARG AITER_VERSION
-# Record hashes for Triton and pybind11 so we can verify later.
+ARG AITER_BRANCH
+ARG AITER_REPO
+ARG MORI_BRANCH
+ARG MORI_REPO
+# Record hashes for torch, Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
-    && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
-    && echo "TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}" >> /app/versions.txt \
-    && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
+    && echo "PYTORCH_BRANCH: ${PYTORCH_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_BRANCH: ${PYTORCH_AUDIO_BRANCH}" >> /app/versions.txt \
+    && echo "PYTORCH_AUDIO_REPO: ${PYTORCH_AUDIO_REPO}" >> /app/versions.txt \
+    && echo "THEROCK_BRANCH: ${THEROCK_BRANCH}" >> /app/versions.txt \
+    && echo "THEROCK_REPO: ${THEROCK_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \
     && echo "AITER_ROCM_ARCH: ${AITER_ROCM_ARCH}" >> /app/versions.txt \
     && echo "TRITON_BRANCH: ${TRITON_BRANCH}" >> /app/versions.txt \
     && echo "TRITON_REPO: ${TRITON_REPO}" >> /app/versions.txt \
     && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
-    && echo "AITER_VERSION: ${AITER_VERSION}" >> /app/versions.txt \
+    && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
+    && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
-    # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
+    # Fingerprint our torch and triton so Dockerfile.rocm can prove they survived.
+    && echo "TORCH_VERSION: $(pip show torch | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
+    && echo "TORCH_SHA256: $(find $(python3 -c 'import torch, os; print(os.path.dirname(torch.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
+        >> /app/versions.txt \
     && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
         -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)" \
