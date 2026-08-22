@@ -138,12 +138,13 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
         > /vllm-version.txt
 
 # -----------------------
-# Rust toolchain inputs
+# Rust/protoc toolchain inputs
 #
 # Keep these separate from Rust source inputs so Rust source-only changes do not
 # invalidate the long-lived ci_base image that carries the toolchain.
 FROM scratch AS rust_toolchain_input_0
 COPY rust-toolchain.toml /rust-toolchain-input/vllm/rust-toolchain.toml
+COPY tools/install_protoc.sh /rust-toolchain-input/vllm/tools/install_protoc.sh
 
 FROM base AS rust_toolchain_input_1
 ARG VLLM_REPO
@@ -154,6 +155,7 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-toolchain-inpu
     && git sparse-checkout init --no-cone \
     && git sparse-checkout set \
         rust-toolchain.toml \
+        tools/install_protoc.sh \
     && git checkout FETCH_HEAD
 
 FROM rust_toolchain_input_${REMOTE_VLLM} AS rust-toolchain-input
@@ -193,16 +195,20 @@ RUN git clone --no-checkout --filter=blob:none ${VLLM_REPO} /rust-input/vllm \
 FROM rust_input_${REMOTE_VLLM} AS rust-input
 
 # -----------------------
-# Rust toolchain
+# Rust/protoc toolchain
 FROM base AS rust-toolchain
 
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=${CARGO_HOME}/bin:${PATH}
 
+# protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
-        ca-certificates curl \
+        ca-certificates curl unzip \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/tools/install_protoc.sh /tmp/install_protoc.sh
+RUN /tmp/install_protoc.sh && rm /tmp/install_protoc.sh
 
 COPY --from=rust-toolchain-input /rust-toolchain-input/vllm/rust-toolchain.toml /tmp/rust-toolchain.toml
 RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"/\1/')" \
@@ -218,7 +224,7 @@ RUN TOOLCHAIN="$(grep '^channel' /tmp/rust-toolchain.toml | sed 's/.*= *"\(.*\)"
 # -----------------------
 # Rust build stage
 # Builds the `vllm-rs` frontend in a dedicated stage so the wheel build stages
-# don't need the rust toolchain.
+# don't need the rust toolchain or protoc.
 FROM rust-toolchain AS rust-build
 ARG COMMON_WORKDIR
 ARG USE_SCCACHE
@@ -279,8 +285,9 @@ COPY --from=fetch_vllm \
     ${COMMON_WORKDIR}/vllm/requirements/rocm.txt \
     requirements/
 
+# Use constraints file to protect triton, pybind11, and torch dependencies.
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
-    uv pip install --system -r requirements/rocm.txt
+    uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt
 
 # Fetch only the pinned ROCm Triton kernels package. Keeping this before the
 # vLLM source COPYs makes the download reusable when native sources change.
@@ -386,7 +393,6 @@ ARG NIXL_BRANCH="231d56753047c989062a5cb2ac703a1ad761c7d2"
 ARG NIXL_REPO="https://github.com/ai-dynamo/nixl.git"
 ARG UCX_BRANCH="96e58a16039f6d7d213bc967b8069238742c5194"
 ARG UCX_REPO="https://github.com/openucx/ucx.git"
-ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV NIXL_HOME=/usr/local/nixl
 
@@ -539,7 +545,7 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
     c_ops="$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so')"; \
     test "$(find /tmp/lmcache-wheel -type f -name 'c_ops*.so' | wc -l)" -eq 1; \
     expected="$(printf '%s' "${LMCACHE_ROCM_ARCH}" | tr ';' '\n' | sort -u)"; \
-    actual="$(/opt/rocm/llvm/bin/llvm-objdump --offloading "${c_ops}" \
+    actual="$(llvm-objdump --offloading "${c_ops}" \
         | grep -oE 'gfx[0-9a-z]+' | sort -u)"; \
     if [ "${actual}" != "${expected}" ]; then \
         printf 'LMCache code objects mismatch\nexpected:\n%s\nactual:\n%s\n' \
@@ -547,32 +553,10 @@ RUN --mount=type=tmpfs,target=/tmp/lmcache-wheel \
         exit 1; \
     fi
 
-# ROCShmem build stage - split from DeepEP so changing DEEPEP_BRANCH does not
-# invalidate the slow ROCShmem build.
-FROM base AS build_rocshmem
-ARG ROCSHMEM_BRANCH="f0acb0c6"
-ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-# DeepEP only supports gfx942 and gfx950; build ROCShmem for the same set so
-# it can be linked against DeepEP without arch mismatches.
-ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
-ENV ROCM_PATH=/opt/rocm
-ENV ROCSHMEM_DIR=/opt/rocshmem
-
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO} \
- && cd rocm-systems \
- && git sparse-checkout set --cone projects/rocshmem \
- && git checkout ${ROCSHMEM_BRANCH} \
- && mkdir -p projects/rocshmem/build \
- && cd projects/rocshmem/build \
- && CC="ccache gcc" CXX="ccache g++" INSTALL_PREFIX=${ROCSHMEM_DIR} \
-    bash ../scripts/build_configs/all_backends \
-      -DROCM_PATH=${ROCM_PATH} \
-      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
-      -DUSE_EXTERNAL_MPI=OFF
-
-# DeepEP build stage - depends on ROCShmem, builds the HIP kernel wheel.
-FROM build_rocshmem AS build_deepep
+# DeepEP build stage. ROCShmem is provided by TheRock SDK
+# ROCSHMEM_DIR set to the SDK install path so DeepEP finds the headers, etc.
+FROM base AS build_deepep
+ENV ROCSHMEM_DIR=${ROCM_PATH}
 ARG DEEPEP_BRANCH="0f63d3e9"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
@@ -774,10 +758,12 @@ ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH=${CARGO_HOME}/bin:${PATH}
 
-# Bake the Rust toolchain into ci_base so Rust build/test steps do not
+# Bake the Rust/protoc toolchain into ci_base so Rust build/test steps do not
 # need to fetch it on each per-commit image build.
 COPY --from=rust-toolchain /root/.cargo /root/.cargo
 COPY --from=rust-toolchain /root/.rustup /root/.rustup
+COPY --from=rust-toolchain /usr/local/bin/protoc /usr/local/bin/protoc
+COPY --from=rust-toolchain /usr/local/include/google /usr/local/include/google
 
 # Update rdma-core to support latest rocshmem.
 ARG DEEPEP_NIC
@@ -793,9 +779,6 @@ fi
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     --mount=type=bind,from=build_deepep,src=/app/deep_install,target=/deep_install \
     uv pip install --system /nixl_install/*.whl /deep_install/*.whl
-
-# Copy ROCShmem runtime libraries.
-COPY --from=build_rocshmem /opt/rocshmem /opt/rocshmem
 
 # RDMA userspace libraries plus FFmpeg dev libs needed by torchcodec.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
@@ -821,7 +804,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
+    uv pip install --system -c /etc/rocm-constraints.txt \
+        -r /tmp/ci-base-requirements/rocm.txt \
     && rm -rf /tmp/ci-base-requirements
 
 # Enable fast and less brittle model downloads in tests.
@@ -933,13 +917,43 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system -c /etc/rocm-constraints.txt -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install --system -c /etc/rocm-constraints.txt *.whl
 
 # Install NIXL ROCm wheel
 RUN --mount=type=bind,from=build_nixl,src=/app/install,target=/nixl_install \
     uv pip install --system /nixl_install/*.whl
+
+# Recompute the base's torch fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^TORCH_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && ACTUAL=$(find $(python3 -c 'import torch, os; print(os.path.dirname(torch.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && echo "torch sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}"
+
+# Recompute the base's triton fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && ACTUAL=$(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
+        -type f \( -name '*.py' -o -name '*.so' \) | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && echo "triton sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && python3 -c "import torch; assert torch.version.hip, f'non-ROCm torch: {torch.__version__}'; print(f'torch={torch.__version__}')"
+
+# Recompute the base's pybind11 fingerprint to detect resolver interference.
+RUN EXPECTED=$(grep '^PYBIND11_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
+    && EXPECTED_ABI=$(grep '^PYBIND11_INTERNALS_VERSION: ' /app/versions.txt | cut -d' ' -f2) \
+    && INC=$(python3 -c 'import pybind11; print(pybind11.get_include())') \
+    && ACTUAL=$(find "${INC}" -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
+    && ACTUAL_ABI=$(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' "${INC}" | awk '{print $NF}') \
+    && echo "pybind11 $(pip show pybind11 | awk '/^Version:/ {print $2}')" \
+        "sha256 expected=${EXPECTED} actual=${ACTUAL}" \
+        "internals expected=${EXPECTED_ABI} actual=${ACTUAL_ABI}" \
+    && test -n "${EXPECTED}" \
+    && test "${EXPECTED}" = "${ACTUAL}" \
+    && test "${EXPECTED_ABI}" = "${ACTUAL_ABI}"
 
 ARG COMMON_WORKDIR
 ARG BASE_IMAGE
