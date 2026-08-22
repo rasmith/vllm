@@ -212,6 +212,13 @@ WORKDIR /app/therock/external-builds/pytorch
 RUN python3 pytorch_torch_repo.py checkout --checkout-dir /app/pytorch \
     --gitrepo-origin ${PYTORCH_REPO} --repo-hashtag ${PYTORCH_BRANCH} \
     --no-commit-hipify
+# ROCm/pytorch#3581: build rocSHMEM for the requested gfx target, not gfx90a
+# xnack variants. HIPIFY leaves the tree dirty, so commit it before picking.
+RUN cd /app/pytorch \
+    && git config user.email build@local && git config user.name build \
+    && git add -A && git commit -q -m hipify \
+    && git fetch -q origin 8c5ddc4002609fc54816dac039975bc39d4a6665 \
+    && git cherry-pick 8c5ddc4002609fc54816dac039975bc39d4a6665
 RUN python3 pytorch_triton_repo.py checkout --checkout-dir /app/triton \
     --torch-dir /app/pytorch \
     --gitrepo-origin ${TRITON_REPO} --repo-hashtag ${TRITON_BRANCH} \
