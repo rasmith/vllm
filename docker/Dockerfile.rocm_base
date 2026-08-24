@@ -11,6 +11,8 @@ ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+ARG ROCPROFILER_SDK_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
 
 
 # TheRock configuration
@@ -284,6 +286,38 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
+# rocprofiler-sdk 1.3.2 fixes torch 2.12 profiler on ROCm 7.2.3
+FROM base AS build_rocprofiler_sdk
+ARG ROCPROFILER_SDK_REPO
+ARG ROCPROFILER_SDK_COMMIT
+ARG USE_SCCACHE
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libdw-dev libelf-dev libsqlite3-dev libzstd-dev \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCPROFILER_SDK_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocprofiler-sdk shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCPROFILER_SDK_COMMIT} \
+    && git checkout -q FETCH_HEAD
+RUN cd /src/projects/rocprofiler-sdk \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+           export CMAKE_C_COMPILER_LAUNCHER=sccache \
+           && export CMAKE_CXX_COMPILER_LAUNCHER=sccache; \
+       fi \
+    && cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH=/opt/rocm \
+        -DCMAKE_INSTALL_PREFIX=/opt/rocm \
+        -DROCPROFILER_BUILD_TESTS=OFF \
+        -DROCPROFILER_BUILD_SAMPLES=OFF \
+        -DROCPROFILER_BUILD_DOCS=OFF \
+    && cmake --build build --parallel "$(nproc)" \
+    && cmake --install build --prefix /staging --strip
+
 FROM base AS final
 
 # Remove the torch wheel's Requires-Dist: triton entry in METADATA and the SHA
@@ -313,6 +347,9 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
+COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
+RUN ldconfig
+
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
 ARG ROCM_SDK_VERSION
@@ -329,8 +366,12 @@ ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG ROCPROFILER_SDK_REPO
+ARG ROCPROFILER_SDK_COMMIT
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
+    && echo "ROCPROFILER_SDK_REPO: ${ROCPROFILER_SDK_REPO}" >> /app/versions.txt \
+    && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
     && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
