@@ -17,6 +17,8 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ARG AOTRITON_BRANCH="rocm714_compat_0.13.50" # 0.13.50tp plus AOTRITON_COMPAT_ABI_0_11
+ARG AOTRITON_REPO="https://github.com/ROCm/aotriton.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 
@@ -305,6 +307,45 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
+### AOTriton Build
+###
+# torch 2.12 bundles AOTriton 0.11.2, whose mem-efficient attention returns
+# different answers for identical inputs on gfx950. 0.13.50 fixes that but moved
+# attn_fwd_params/attn_bwd_params, and torch allocates those structs itself.
+# AOTRITON_COMPAT_ABI_0_11 builds 0.13.50 with the 0.11.x layout and SONAME, so it
+# drops onto the wheel with no shim. Cost is THD/padded-varlen, which torch 2.12
+# has no field to ask for anyway.
+FROM base AS build_aotriton
+ARG AOTRITON_BRANCH
+ARG AOTRITON_REPO
+RUN git clone --recursive --branch ${AOTRITON_BRANCH} ${AOTRITON_REPO}
+WORKDIR /app/aotriton
+RUN pip install -r requirements.txt \
+    && pip wheel third_party/triton -w /app/aotriton/triton_wheel
+# Only the CDNA arches, the ones the torch wheels ship aotriton.images for -- same
+# filter build_fa uses, and compiling the Triton kernel images costs hours per arch.
+# NO_PYTHON is required by the compat option: the bindings' eager LazyTensor has no
+# home in the 0.11.x layout.
+RUN cmake -S . -B build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/app/aotriton/install_dir \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DAOTRITON_TARGET_ARCH="$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g')" \
+        -DAOTRITON_GPU_BUILD_TIMEOUT=0 \
+        -DAOTRITON_NO_PYTHON=ON \
+        -DAOTRITON_COMPAT_ABI_0_11=ON \
+        -DAOTRITON_USE_LOCAL_TRITON_WHEEL=$(ls /app/aotriton/triton_wheel/triton-*.whl | head -1) \
+    && ninja -C build ${MAX_JOBS:+-j ${MAX_JOBS}} install/strip
+# The built file is .0.13.50 with a .0.11.2 symlink; stage it under the SONAME so
+# the final stage can copy it straight over the wheel's copy.
+RUN mkdir -p /app/install/aotriton \
+    && cp -a install_dir/lib/libaotriton_v2.so.0.13.50 \
+        /app/install/aotriton/libaotriton_v2.so.0.11.2 \
+    && cp -a install_dir/lib/aotriton.images /app/install/aotriton/ \
+    && ls /app/install/aotriton/aotriton.images
+WORKDIR /app
+
+
+###
 ### Final Build
 ###
 
@@ -357,6 +398,29 @@ RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
     && echo "torch pins triton==${PINNED}, installed ${INSTALLED}" \
     && test "${PINNED}" = "${INSTALLED}"
 
+# Swap the compat AOTriton in. 0.13.50 packs its kernels as flash/<name>.zip where
+# 0.11.2 used flash/<name>/ directories, so the images are replaced wholesale, not
+# merged -- a leftover 0.11.2 arch dir would find nothing. Hence the check that the
+# build covered every arch the wheels shipped. The import is the real test of the
+# library: libtorch_hip DT_NEEDEDs libaotriton_v2.so.0.11.2, so it resolves symbols.
+RUN --mount=type=bind,from=build_aotriton,src=/app/install/aotriton,target=/aotriton \
+    TORCH_LIB=$(python3 -c "import torch, os; print(os.path.dirname(torch.__file__))")/lib \
+    && SHIPPED=$(ls ${TORCH_LIB}/aotriton.images) \
+    && rm -rf ${TORCH_LIB}/aotriton.images \
+    && cp -a /aotriton/aotriton.images ${TORCH_LIB}/ \
+    && cp -a /aotriton/libaotriton_v2.so.0.11.2 ${TORCH_LIB}/ \
+    && ln -sfn libaotriton_v2.so.0.11.2 ${TORCH_LIB}/libaotriton_v2.so \
+    && strings ${TORCH_LIB}/libaotriton_v2.so.0.11.2 | grep -q 'AOTriton 0\.13\.50' \
+    && for d in ${SHIPPED}; do \
+           test -f ${TORCH_LIB}/aotriton.images/${d}/flash/attn_fwd.zip \
+           || { echo "torch shipped AOTriton images for ${d#amd-} but the build did not;" \
+                     "widen the arch filter in build_aotriton"; exit 1; }; \
+       done \
+    && ls ${TORCH_LIB}/aotriton.images | sed 's/^amd-//' | paste -sd';' \
+        > /app/aotriton_archs.txt \
+    && echo "AOTriton 0.13.50 (compat ABI) installed for: $(cat /app/aotriton_archs.txt)" \
+    && python3 -c "import torch; print(f'torch={torch.__version__}')"
+
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
 ARG ROCM_SDK_VERSION
@@ -376,6 +440,8 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
+ARG AOTRITON_BRANCH
+ARG AOTRITON_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
 # Record hashes for torch, Triton and pybind11 so we can verify later.
@@ -398,6 +464,9 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
+    && echo "AOTRITON_BRANCH: ${AOTRITON_BRANCH}" >> /app/versions.txt \
+    && echo "AOTRITON_REPO: ${AOTRITON_REPO}" >> /app/versions.txt \
+    && echo "AOTRITON_ROCM_ARCH: $(cat /app/aotriton_archs.txt)" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
     # Fingerprint our torch and triton so Dockerfile.rocm can prove they survived.
