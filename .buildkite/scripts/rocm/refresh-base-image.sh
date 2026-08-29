@@ -419,10 +419,13 @@ build_base_image() {
     content_files_hash="$(compute_content_hash "${content_paths[@]}")"
     base_hash=$(compute_base_content_hash "${use_sccache}" "${base_image_digest}")
     rocm_version="$(rocm_version_from_base_image "${base_image_arg}")"
-    triton_arg="$(extract_arg_default TRITON_BRANCH)"
-    pytorch_arg="$(extract_arg_default PYTORCH_BRANCH)"
-    pytorch_vision_arg="$(extract_arg_default PYTORCH_VISION_BRANCH)"
-    pytorch_audio_arg="$(extract_arg_default PYTORCH_AUDIO_BRANCH)"
+    # These four are wheel pins, not branches -- the *_BRANCH names they used to read
+    # do not exist in the Dockerfile, so the summary carried empty strings and a
+    # version bump did not invalidate the cached base image.
+    triton_arg="$(extract_arg_default TRITON_VERSION)"
+    pytorch_arg="$(extract_arg_default TORCH_VERSION)"
+    pytorch_vision_arg="$(extract_arg_default TORCHVISION_VERSION)"
+    pytorch_audio_arg="$(extract_arg_default TORCHAUDIO_VERSION)"
     fa_arg="$(extract_arg_default FA_BRANCH)"
     aiter_arg="$(extract_arg_default AITER_BRANCH)"
     mori_arg="$(extract_arg_default MORI_BRANCH)"
