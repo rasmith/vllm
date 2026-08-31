@@ -56,14 +56,68 @@ def _get_model() -> str:
 
 
 def _complete(client: openai.OpenAI, prompt: str, max_tokens: int = 20):
-    """Send a completion request and return (text, prompt_tokens)."""
+    """Send a completion request and return (text, prompt_tokens, logprobs)."""
     resp = client.completions.create(
         model=_get_model(),
         prompt=prompt,
         max_tokens=max_tokens,
         temperature=0,
+        logprobs=5,
     )
-    return resp.choices[0].text, resp.usage.prompt_tokens
+    return resp.choices[0].text, resp.usage.prompt_tokens, resp.choices[0].logprobs
+
+
+# ── Greedy output comparison ──────────────────────────────────────────────
+
+# Greedy decoding is an argmax, so when the top two candidates sit within a
+# rounding step the winner is decided by the tie-break rather than by the model.
+NEAR_TIE_TOL = 0.25
+
+
+def _first_divergence(lp1, lp2) -> int | None:
+    """Index of the first generated token at which two completions disagree."""
+    for i, (t1, t2) in enumerate(zip(lp1.tokens, lp2.tokens)):
+        if t1 != t2:
+            return i
+    return None
+
+
+def _candidate_gap(lp, i: int, tok_a: str, tok_b: str) -> float | None:
+    """Logprob gap between two candidates at position i, or None if either is absent."""
+    top = lp.top_logprobs[i] if lp.top_logprobs and i < len(lp.top_logprobs) else None
+    if not top or tok_a not in top or tok_b not in top:
+        return None
+    return abs(top[tok_a] - top[tok_b])
+
+
+def _assert_outputs_agree(label: str, text1: str, lp1, text2: str, lp2) -> None:
+    """Assert two greedy completions match, excusing a near-tie at the split point.
+
+    A mismatch is excused only when both paths rank the other's token within
+    NEAR_TIE_TOL nats of their own, which makes the winner a rounding artifact.
+    """
+    if text1 == text2:
+        return
+    detail = f"{label}: greedy outputs differ\n  text1={text1!r}\n  text2={text2!r}"
+    assert lp1 is not None and lp2 is not None, (
+        f"{detail}\n  no logprobs returned, cannot tell a near-tie from a real change"
+    )
+    i = _first_divergence(lp1, lp2)
+    assert i is not None, (
+        f"{detail}\n  token streams agree, so the lengths differ (early stop?)"
+    )
+    tok1, tok2 = lp1.tokens[i], lp2.tokens[i]
+    gap1 = _candidate_gap(lp1, i, tok1, tok2)
+    gap2 = _candidate_gap(lp2, i, tok1, tok2)
+    detail = (
+        f"{detail}\n  diverged at generated token {i}: {tok1!r} vs {tok2!r}, "
+        f"gaps {gap1} / {gap2} nats, tol {NEAR_TIE_TOL}"
+    )
+    assert gap1 is not None and gap2 is not None, (
+        f"{detail}\n  each path is confident, so this is not a tie-break artifact"
+    )
+    assert gap1 <= NEAR_TIE_TOL and gap2 <= NEAR_TIE_TOL, detail
+    print(f"WARNING: excusing near-tie greedy divergence. {detail}")
 
 
 # ── Prometheus metrics helpers ────────────────────────────────────────────
@@ -204,15 +258,17 @@ def test_short_prompt_correctness():
     """Short prompt (< block_size): output matches prefill, NIXL used."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, _ = _complete(proxy_client, SHORT_PROMPT)
+    proxy_text, _, proxy_lp = _complete(proxy_client, SHORT_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     d = _metrics_delta(m0, m1)
 
-    prefill_text, _ = _complete(prefill_client, SHORT_PROMPT)
+    prefill_text, _, prefill_lp = _complete(prefill_client, SHORT_PROMPT)
     print(f"SHORT PROMPT: {proxy_text=}, nixl_bytes_delta={n1 - n0}")
-    assert proxy_text == prefill_text
+    _assert_outputs_agree(
+        "SHORT PROMPT", proxy_text, proxy_lp, prefill_text, prefill_lp
+    )
     assert d["external_kv_transfer"] > 0, (
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
@@ -226,15 +282,17 @@ def test_block_boundary_correctness():
     """Exactly block_size tokens: output matches prefill, NIXL used."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, pt = _complete(proxy_client, BLOCK_BOUNDARY_PROMPT)
+    proxy_text, pt, proxy_lp = _complete(proxy_client, BLOCK_BOUNDARY_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     d = _metrics_delta(m0, m1)
 
-    prefill_text, _ = _complete(prefill_client, BLOCK_BOUNDARY_PROMPT)
+    prefill_text, _, prefill_lp = _complete(prefill_client, BLOCK_BOUNDARY_PROMPT)
     print(f"BLOCK BOUNDARY: {pt} prompt tokens, nixl_bytes_delta={n1 - n0}")
-    assert proxy_text == prefill_text
+    _assert_outputs_agree(
+        "BLOCK BOUNDARY", proxy_text, proxy_lp, prefill_text, prefill_lp
+    )
     assert d["external_kv_transfer"] > 0, (
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
@@ -248,15 +306,17 @@ def test_above_block_boundary_correctness():
     """Just above block_size (partial second block): output matches prefill."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, pt = _complete(proxy_client, ABOVE_BOUNDARY_PROMPT)
+    proxy_text, pt, proxy_lp = _complete(proxy_client, ABOVE_BOUNDARY_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     d = _metrics_delta(m0, m1)
 
-    prefill_text, _ = _complete(prefill_client, ABOVE_BOUNDARY_PROMPT)
+    prefill_text, _, prefill_lp = _complete(prefill_client, ABOVE_BOUNDARY_PROMPT)
     print(f"ABOVE BOUNDARY: {pt} prompt tokens, nixl_bytes_delta={n1 - n0}")
-    assert proxy_text == prefill_text
+    _assert_outputs_agree(
+        "ABOVE BOUNDARY", proxy_text, proxy_lp, prefill_text, prefill_lp
+    )
     assert d["external_kv_transfer"] > 0, (
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
@@ -270,15 +330,15 @@ def test_multi_block_correctness():
     """Multi-block prompt (~4x block_size): output matches prefill."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, pt = _complete(proxy_client, MULTI_BLOCK_PROMPT)
+    proxy_text, pt, proxy_lp = _complete(proxy_client, MULTI_BLOCK_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     d = _metrics_delta(m0, m1)
 
-    prefill_text, _ = _complete(prefill_client, MULTI_BLOCK_PROMPT)
+    prefill_text, _, prefill_lp = _complete(prefill_client, MULTI_BLOCK_PROMPT)
     print(f"MULTI BLOCK: {pt} prompt tokens, nixl_bytes_delta={n1 - n0}")
-    assert proxy_text == prefill_text
+    _assert_outputs_agree("MULTI BLOCK", proxy_text, proxy_lp, prefill_text, prefill_lp)
     assert d["external_kv_transfer"] > 0, (
         "NIXL transfer did not occur — decode may have silently fallen back "
         "to local compute"
@@ -300,7 +360,7 @@ def test_cold_decode_no_cache_hit_metrics():
     """Cold decode: external_kv_transfer==P, local_cache_hit==0, local_compute==0."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, P = _complete(proxy_client, MEDIUM_PROMPT)
+    proxy_text, P, _ = _complete(proxy_client, MEDIUM_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
@@ -325,11 +385,11 @@ def test_cold_decode_no_cache_hit_metrics():
 
 def test_full_decode_gpu_cache_hit_metrics():
     """Prime decode, resend via proxy: local_cache_hit==cached blocks."""
-    decode_text, _ = _complete(decode_client, FULL_CACHE_HIT_PROMPT)
+    decode_text, _, _ = _complete(decode_client, FULL_CACHE_HIT_PROMPT)
 
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, P = _complete(proxy_client, FULL_CACHE_HIT_PROMPT)
+    proxy_text, P, _ = _complete(proxy_client, FULL_CACHE_HIT_PROMPT)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
@@ -359,7 +419,7 @@ def test_full_decode_gpu_cache_hit_metrics():
 
 def test_partial_decode_gpu_cache_hit_metrics():
     """Prime with prefix, extend via proxy: partial local_cache_hit."""
-    _, prefix_tokens = _complete(decode_client, PARTIAL_CACHE_PREFIX)
+    _, prefix_tokens, _ = _complete(decode_client, PARTIAL_CACHE_PREFIX)
     cached = (prefix_tokens // BLOCK_SIZE) * BLOCK_SIZE
     assert cached >= BLOCK_SIZE, (
         f"PARTIAL_CACHE_PREFIX too short ({prefix_tokens} tokens) for partial "
@@ -368,7 +428,7 @@ def test_partial_decode_gpu_cache_hit_metrics():
 
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    proxy_text, P = _complete(proxy_client, PARTIAL_CACHE_EXTENDED)
+    proxy_text, P, _ = _complete(proxy_client, PARTIAL_CACHE_EXTENDED)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
@@ -400,7 +460,7 @@ def test_decode_direct_all_local_compute():
     prompt = "The speed of light is approximately"
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
-    text, P = _complete(decode_client, prompt)
+    text, P, _ = _complete(decode_client, prompt)
     time.sleep(1)
     m1 = _fetch_decode_metrics()
     n1 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
@@ -447,14 +507,14 @@ EVICTION_PROMPT = (  # noqa: E501
 
 def test_prefill_cpu_offload_after_gpu_eviction():
     """Prefill-side: evict GPU, re-request directly, CPU offload restores KV."""
-    text1, P = _complete(prefill_client, EVICTION_PROMPT, max_tokens=30)
+    text1, P, lp1 = _complete(prefill_client, EVICTION_PROMPT, max_tokens=30)
 
     for i in range(100):
         _complete(prefill_client, f"Eviction prompt number {i}: " + _make_prompt(200))
 
     ob0 = _fetch_offload_bytes(PREFILL_HOST, PREFILL_PORT)
     m0 = _fetch_prefill_metrics()
-    text2, _ = _complete(prefill_client, EVICTION_PROMPT, max_tokens=30)
+    text2, _, lp2 = _complete(prefill_client, EVICTION_PROMPT, max_tokens=30)
 
     cpu_to_gpu_delta = 0.0
     for _ in range(10):
@@ -466,12 +526,25 @@ def test_prefill_cpu_offload_after_gpu_eviction():
 
     m1 = _fetch_prefill_metrics()
     d = _metrics_delta(m0, m1)
+    restored = (P // BLOCK_SIZE) * BLOCK_SIZE
 
     print(f"PREFILL CPU OFFLOAD: run1={text1[:60]!r}, run2={text2[:60]!r}")
     print(f"  prefill metrics delta: {d}")
     print(f"  cpu_to_gpu bytes delta: {cpu_to_gpu_delta}")
-    assert text1 == text2, f"inconsistent after eviction: {text1=!r}, {text2=!r}"
     assert cpu_to_gpu_delta > 0, (
         f"expected cpu_to_gpu bytes > 0 (OffloadingConnector should restore "
         f"KV from CPU to GPU), got {cpu_to_gpu_delta}"
     )
+    assert d["external_kv_transfer"] == restored, (
+        f"expected external_kv_transfer={restored} restored from CPU, got "
+        f"{d['external_kv_transfer']}"
+    )
+    assert d["local_compute"] == P - restored, (
+        f"expected local_compute={P - restored} for the uncached tail, got "
+        f"{d['local_compute']}"
+    )
+    assert d["local_cache_hit"] == 0, (
+        f"expected local_cache_hit=0 (the GPU cache should have been evicted), "
+        f"got {d['local_cache_hit']}"
+    )
+    _assert_outputs_agree("PREFILL CPU OFFLOAD", text1, lp1, text2, lp2)
