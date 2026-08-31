@@ -6,11 +6,6 @@ ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
 # Prebuilt on the whl-next index, and exactly what torch 2.12.0+rocm10.0.0 asks for in
 # Requires-Dist. 3.8.x also carries the lgkmcnt fix for the _mla_gluon waitcnt fault.
 ARG TRITON_VERSION=3.8.0+git4cff872c.rocm10.0.0
-# The index wheel's version string names its source commit, so building this commit
-# reproduces that wheel exactly. PR 964 is then the only difference.
-ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG TRITON_COMMIT="4cff872ced001ea92d9fcf05b3f6517e2b486d19"
-ARG TRITON_PR964="e0a7f0f5638204aa928882fc4f692832ce22aa01 ccff3a9fc70d97b1830bff8704d4b00ea1746286"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
@@ -200,37 +195,6 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 
 ###
-### Triton Build
-###
-# Same source as the index wheel installed in base, plus ROCm/triton PR 964, which is
-# closed and will not land there. That PR emitted emitOtherStore inside the load block,
-# which masked-out lanes never enter, so the `other` value never reached LDS.
-FROM base AS build_triton
-ARG TRITON_REPO
-ARG TRITON_COMMIT
-ARG TRITON_PR964
-ARG TRITON_VERSION
-# TRITON_VERSION embeds the short SHA the index wheel was built from. Fail here rather
-# than silently build a different triton than the one we are replacing.
-RUN test "git$(echo ${TRITON_COMMIT} | cut -c1-8)" \
-       = "$(echo ${TRITON_VERSION} | cut -d+ -f2 | cut -d. -f1)"
-RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_COMMIT} \
-    && git fetch --no-tags origin refs/pull/964/head:refs/pr/964 \
-    # -n keeps this from needing a committer identity.
-    && git cherry-pick -n ${TRITON_PR964} \
-    # A codegen fix is invisible after install, so prove it landed while we can see it.
-    && grep -A3 'requiresAliasInfoForAsyncOps' \
-         third_party/amd/lib/TritonAMDGPUToLLVM/LoadStoreOpToLLVM.cpp \
-       | grep -q 'setInsertionPointToStart(afterLoadBlock)' \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    # setup.py derives "+git<sha>" from the checkout, so this lands on
-    # ${TRITON_VERSION}.pr964 -- the index wheel's version, marked as patched.
-    && TRITON_WHEEL_VERSION_SUFFIX=".rocm10.0.0.pr964" python3 setup.py bdist_wheel --dist-dir=dist
-RUN mkdir -p /app/install && cp /app/triton/dist/*.whl /app/install
-
-###
 ### MORI Build
 ###
 FROM base AS build_mori
@@ -297,8 +261,6 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 # only includes dependencies used by wheel release pipeline
 FROM base AS debs_wheel_release
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -306,8 +268,6 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 
 FROM base AS debs
 RUN mkdir /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
@@ -317,22 +277,14 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 
 FROM base AS final
 
-# Our triton is built from source and so carries a different local version than the one
-# torch's Requires-Dist names. Left alone, pip re-resolves that pin and reinstalls the
-# index wheel over ours; a constraints file cannot help, because this is a hard
-# requirement rather than a preference. Drop the line and blank its RECORD hash.
+# Triton now comes off the index and is the same version torch's Requires-Dist names,
+# so the METADATA surgery the source build needed is gone and this resolves normally.
 ARG TRITON_VERSION
-RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
-    && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
-
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
-    pip install $(ls /install/*.whl | grep -v '/triton-') \
-    && pip install --no-deps --force-reinstall /install/triton-*.whl \
+    pip install /install/*.whl \
     # Nothing should displace our pins, so any complaint here is real.
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
-    && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}.pr964" \
+    && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
     # triton, requirements will try to reinstall repeatedly.
     && pip list --format=freeze \
