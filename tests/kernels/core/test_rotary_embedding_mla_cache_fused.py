@@ -189,6 +189,7 @@ def test_concat_and_cache_mla_rope_fused(
     # Other paths use the CUDA defaults.
     rocm_neox = current_platform.is_rocm() and is_neox_style
     rocm_bf16 = current_platform.is_rocm() and dtype == torch.bfloat16
+    rocm_neox_fp16 = rocm_neox and dtype == torch.float16
     if kv_cache_dtype == "fp8":
         result_temp = torch.empty_like(kv_cache, dtype=torch.float16)
         ops.convert_fp8(
@@ -214,9 +215,17 @@ def test_concat_and_cache_mla_rope_fused(
     else:
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
+    # The fused kernel accumulates in fp16, so its absolute error floor is one
+    # fp16 ULP at the *input* magnitude (|q| up to ~4.6, i.e. 1.95e-3-3.9e-3),
+    # not at the output magnitude. Elements where rope cancels leave a small
+    # result carrying that same absolute error, and rtol cannot cover them, so
+    # the fp16 neox query needs atol >= 1 input ULP. Measured need is 1.19e-3
+    # on Triton 3.8.0 and 9.4e-4 on 3.7.1; 2e-3 covers both with headroom.
     torch.testing.assert_close(
         query,
         ref_q_pe,
-        atol=0.04 if rocm_bf16 else get_default_atol(query),
+        atol=0.04
+        if rocm_bf16
+        else (2e-3 if rocm_neox_fp16 else get_default_atol(query)),
         rtol=get_default_rtol(query),
     )
