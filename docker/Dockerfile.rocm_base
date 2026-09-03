@@ -9,12 +9,19 @@ ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
 ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG AOTRITON_BRANCH="rocm714_compat_0.13.50" # 0.13.50tp plus AOTRITON_COMPAT_ABI_0_11
-ARG AOTRITON_REPO="https://github.com/ROCm/aotriton.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCPROFILER_SDK_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCPROFILER_SDK_COMMIT="2b22ab0195cc1461cd9abf3b969e9dd7c10af350"
+ARG ROCM_RUNTIME_REPO="https://github.com/mawong-amd/rocm-systems.git"
+ARG ROCM_RUNTIME_COMMIT="cf439e5fd07ff22f50dec4e1659719c33d53c44c" # 7.14/hsa_gpu_edge_signal
+ARG AOTRITON_REPO="https://github.com/ROCm/aotriton.git"
+ARG AOTRITON_TAG="0.11.2b" # Stock upstream, native SONAME libaotriton_v2.so.0.11.2
+ARG AOTRITON_DB_TAG="0.13.50tp" # Donor for the gfx950 forward tuning DB, nothing else
+ARG AOTRITON_DB_SHA256="f981eb3db4a095d9eb308e2d5e150b1e063ab9f5f40a140c8369353aadd871cf"
+# Set to 1 only for single-arch iteration builds. Ship builds must leave it 0 so
+# a narrowed PYTORCH_ROCM_ARCH cannot silently drop arches torch still expects.
+ARG AOTRITON_ALLOW_PARTIAL_ARCH="0"
 
 
 # TheRock configuration
@@ -264,46 +271,6 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 
 ###
-### AOTriton Build
-###
-# The torch 2.12 wheel bundles AOTriton 0.11.2, whose mem-efficient attention returns
-# different answers for identical inputs on gfx950. 0.13.50 fixes that but moved
-# attn_fwd_params/attn_bwd_params, and torch allocates those structs itself.
-# AOTRITON_COMPAT_ABI_0_11 builds 0.13.50 with the 0.11.x layout and SONAME, so it
-# drops onto the wheel with no shim. Cost is THD/padded-varlen, which torch 2.12 has
-# no field to ask for anyway.
-FROM base AS build_aotriton
-ARG AOTRITON_BRANCH
-ARG AOTRITON_REPO
-ARG MAX_JOBS
-RUN git clone --recursive --branch ${AOTRITON_BRANCH} ${AOTRITON_REPO}
-WORKDIR /app/aotriton
-RUN pip install -r requirements.txt \
-    && pip wheel third_party/triton -w /app/aotriton/triton_wheel
-# Only the CDNA arches, the ones the torch wheels ship aotriton.images for -- same
-# filter build_fa uses, and compiling the Triton kernel images costs hours per arch.
-# NO_PYTHON is required by the compat option: the bindings' eager LazyTensor has no
-# home in the 0.11.x layout.
-RUN cmake -S . -B build -G Ninja \
-        -DCMAKE_INSTALL_PREFIX=/app/aotriton/install_dir \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DAOTRITON_TARGET_ARCH="$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g')" \
-        -DAOTRITON_GPU_BUILD_TIMEOUT=0 \
-        -DAOTRITON_NO_PYTHON=ON \
-        -DAOTRITON_COMPAT_ABI_0_11=ON \
-        -DAOTRITON_USE_LOCAL_TRITON_WHEEL=$(ls /app/aotriton/triton_wheel/triton-*.whl | head -1) \
-    && ninja -C build -j ${MAX_JOBS:-$(nproc)} install/strip
-# The built file is .0.13.50 with a .0.11.2 symlink; stage it under the SONAME so the
-# final stage can copy it straight over the wheel's copy.
-RUN mkdir -p /app/install/aotriton \
-    && cp -a install_dir/lib/libaotriton_v2.so.0.13.50 \
-        /app/install/aotriton/libaotriton_v2.so.0.11.2 \
-    && cp -a install_dir/lib/aotriton.images /app/install/aotriton/ \
-    && ls /app/install/aotriton/aotriton.images
-WORKDIR /app
-
-
-###
 ### Final Build
 ###
 
@@ -361,6 +328,138 @@ RUN cd /src/projects/rocprofiler-sdk \
     && cmake --build build --parallel "$(nproc)" \
     && cmake --install build --prefix /staging --strip
 
+
+###
+### ROCr + CLR build
+###
+# Matt Wong's ordering-edge-signal stack, branched off the same rocm-systems 7.14 commit
+# the rocprofiler-sdk build above pins. ROCr grows hsa_amd_signal_create_v2, which hands
+# out signals whose value word lives in device memory; clr keeps a per device pool of them
+# and names one in barrier_packet_.dep_signal[] instead of a host resident signal, so an
+# ordering edge between two queues no longer costs a host round trip. That is the decode
+# latency win measured in vllm-project/vllm#53712, which did the same thing for the apt
+# ROCm 7.2.3 base image. Here the SDK arrives as TheRock wheels, so the build targets
+# ${ROCM_PATH} and the sysdeps the wheels bundle rather than /opt/rocm.
+FROM base AS build_rocm_runtime
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
+ARG MAX_JOBS
+# clr calls find_package(OpenGL REQUIRED) whether or not GL interop is wanted, and ROCr's
+# header codegen wants CppHeaderParser and xxd. elf, drm and numa deliberately come from
+# the SDK's rocm_sysdeps and not from apt, so the rebuilt libraries carry the same
+# librocm_sysdeps_* DT_NEEDED entries as the wheels' own.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl-dev libglx-dev mesa-common-dev xxd \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir CppHeaderParser
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCM_RUNTIME_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
+    && git checkout -q FETCH_HEAD
+# ROCr first, and installed over the SDK, because clr's rocrctx.hpp needs the
+# hsa_amd_signal_create_desc_t that this adds to hsa_ext_amd.h.
+RUN cd /src/projects/rocr-runtime \
+    && PKG_CONFIG_PATH=${ROCM_PATH}/lib/rocm_sysdeps/lib/pkgconfig \
+       cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="${ROCM_PATH}/lib/rocm_sysdeps;${ROCM_PATH}" \
+        -DCMAKE_INSTALL_PREFIX="${ROCM_PATH}" \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/rocm_sysdeps/lib' \
+    && cmake --build build --parallel ${MAX_JOBS:-$(nproc)} \
+    && cmake --install build \
+    && cmake --install build --prefix /rocr-install --strip
+# ROCM_KPACK_ENABLED is off by default upstream but on in the wheels: without it hip
+# refuses the split device code in the amd-torch-device-gfx* packages with
+# "Kpack code object but ROCM_KPACK_ENABLED=OFF".
+RUN cd /src/projects/clr \
+    && PKG_CONFIG_PATH=${ROCM_PATH}/lib/rocm_sysdeps/lib/pkgconfig \
+       cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_COMMON_DIR=/src/projects/hip \
+        -DROCM_PATH="${ROCM_PATH}" \
+        -DCMAKE_PREFIX_PATH="${ROCM_PATH}/lib/rocm_sysdeps;${ROCM_PATH}" \
+        -DCMAKE_INSTALL_PREFIX="${ROCM_PATH}" \
+        -DHIP_LLVM_ROOT="${ROCM_PATH}/lib/llvm" \
+        -DPROF_API_HEADER_PATH="${ROCM_PATH}/include/roctracer/ext" \
+        -DROCM_KPACK_ENABLED=ON \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/rocm_sysdeps/lib:$ORIGIN/llvm/lib' \
+    && cmake --build build --parallel ${MAX_JOBS:-$(nproc)} \
+    && cmake --install build --prefix /clr-install --strip
+RUN mkdir -p /staging/lib \
+    && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
+    && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
+    && ls -l /staging/lib
+
+
+###
+### AOTriton Build
+###
+# torch 2.12 bundles AOTriton 0.11.2, whose mem-efficient attention is wrong on gfx950:
+# four test_prefix_prefill.py ALiBi ids miss atol=1e-6 by 3e-5 to 5e-4. The forward
+# kernel source is functionally identical between 0.11.2b and 0.13.50 on that path, so
+# the cause is the gfx950 forward tuning database, and swapping just that file closes
+# all four. See ~/claude/aotriton/CANDIDATES.md for the measurements.
+#
+# MEASURED COST, read before shipping this: on a 48-shape SDPA sweep the swap is a
+# median 15% slower than stock 0.11.2 and 19% slower in aggregate than the
+# AOTRITON_COMPAT_ABI_0_11 build of 0.13.50 that this stage replaces. It buys
+# correctness with throughput. The compat build was both correct and faster.
+FROM base AS build_aotriton
+ARG AOTRITON_REPO
+ARG AOTRITON_TAG
+ARG AOTRITON_DB_TAG
+ARG AOTRITON_DB_SHA256
+ARG MAX_JOBS
+RUN git clone --depth 1 --branch ${AOTRITON_TAG} --recursive ${AOTRITON_REPO} aotriton
+WORKDIR /app/aotriton
+# The tuning database is a BUILD-TIME input, not a runtime file, so it has to be in
+# place before cmake configures. v3python/kernel/kdesc.py:translate_dataframe() derives
+# the set of kernel signatures to compile straight from the database rows, which is why
+# this swap changes what gets built at all (21216 -> 23162 ninja targets). Copying the
+# file into a finished image would do nothing whatsoever.
+#
+# Pinned to a tag, not a branch: the database decides which kernels exist, so a moving
+# tip would silently change the contents of the image. The sha256 check is what makes
+# that failure loud. Note the directory was renamed between the two versions --
+# modules/database in 0.13.50, v3python/database in 0.11.2b -- so this copies one file
+# to a different path, it does not merge trees.
+RUN DST=v3python/database/amd/gfx950/flash/attn_fwd.sqlite3.tar.xz \
+    && test -f ${DST} \
+    && git fetch --depth 1 origin refs/tags/${AOTRITON_DB_TAG} \
+    && git show FETCH_HEAD:modules/database/amd/gfx950/flash/attn_fwd.sqlite3.tar.xz > ${DST} \
+    && echo "${AOTRITON_DB_SHA256}  ${DST}" | sha256sum -c - \
+    && echo "gfx950 attn_fwd tuning DB <- ${AOTRITON_DB_TAG}"
+RUN pip install -r requirements.txt \
+    && pip wheel third_party/triton -w /app/aotriton/triton_wheel
+# Only the CDNA arches, the ones the torch wheels ship aotriton.images for -- same
+# filter build_fa uses, and compiling the Triton kernel images costs hours per arch.
+# AOTRITON_COMPAT_ABI_0_11 is deliberately absent: 0.11.2b already is the ABI and the
+# SONAME torch links against, which is the point of building this tag. NO_PYTHON is
+# kept because that is the configuration the accuracy result was measured with.
+RUN cmake -S . -B build -G Ninja \
+        -DCMAKE_INSTALL_PREFIX=/app/aotriton/install_dir \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DAOTRITON_TARGET_ARCH="$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g')" \
+        -DAOTRITON_GPU_BUILD_TIMEOUT=0 \
+        -DAOTRITON_NO_PYTHON=ON \
+        -DAOTRITON_USE_LOCAL_TRITON_WHEEL=$(ls /app/aotriton/triton_wheel/triton-*.whl | head -1) \
+    && ninja -C build -j ${MAX_JOBS:-$(nproc)} install/strip
+RUN mkdir -p /app/install/aotriton \
+    && cp -a install_dir/lib/libaotriton_v2.so.0.11.2 /app/install/aotriton/ \
+    && cp -a install_dir/lib/aotriton.images /app/install/aotriton/ \
+    && ls /app/install/aotriton/aotriton.images
+WORKDIR /app
+
+
 FROM base AS final
 
 # Remove the torch wheel's Requires-Dist: triton entry in METADATA and the SHA
@@ -390,11 +489,17 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
-# Swap the compat AOTriton in. 0.13.50 packs its kernels as flash/<name>.zip where
-# 0.11.2 used flash/<name>/ directories, so the images are replaced wholesale, not
-# merged -- a leftover 0.11.2 arch dir would find nothing. Hence the check that the
-# build covered every arch the wheels shipped. The import is the real test of the
-# library: libtorch_hip DT_NEEDEDs libaotriton_v2.so.0.11.2, so it resolves symbols.
+# Swap our AOTriton in. Same 0.11.2 SONAME and same images layout as the wheel's copy,
+# but the two are a matched pair and must move together: the autotune lookup tables are
+# compiled into the .so and they index the kernel images by name, so a new .so against
+# the wheel's images would select variants that are not there. Replaced wholesale, not
+# merged. The import is the real test -- libtorch_hip DT_NEEDEDs
+# libaotriton_v2.so.0.11.2, so a bad library fails to resolve.
+# Declared here rather than in the versions.txt block below because this RUN needs them.
+ARG AOTRITON_REPO
+ARG AOTRITON_TAG
+ARG AOTRITON_DB_TAG
+ARG AOTRITON_ALLOW_PARTIAL_ARCH
 RUN --mount=type=bind,from=build_aotriton,src=/app/install/aotriton,target=/aotriton \
     TORCH_LIB=$(python3 -c "import torch, os; print(os.path.dirname(torch.__file__))")/lib \
     && SHIPPED=$(ls ${TORCH_LIB}/aotriton.images) \
@@ -402,19 +507,49 @@ RUN --mount=type=bind,from=build_aotriton,src=/app/install/aotriton,target=/aotr
     && cp -a /aotriton/aotriton.images ${TORCH_LIB}/ \
     && cp -a /aotriton/libaotriton_v2.so.0.11.2 ${TORCH_LIB}/ \
     && ln -sfn libaotriton_v2.so.0.11.2 ${TORCH_LIB}/libaotriton_v2.so \
-    && strings ${TORCH_LIB}/libaotriton_v2.so.0.11.2 | grep -q 'AOTriton 0\.13\.50' \
+    && strings ${TORCH_LIB}/libaotriton_v2.so.0.11.2 | grep -q 'AOTriton 0\.11\.2' \
     && for d in ${SHIPPED}; do \
-           test -f ${TORCH_LIB}/aotriton.images/${d}/flash/attn_fwd.zip \
+           ls -A ${TORCH_LIB}/aotriton.images/${d}/flash/attn_fwd 2>/dev/null | grep -q . \
            || { echo "torch shipped AOTriton images for ${d#amd-} but the build did not;" \
-                     "widen the arch filter in build_aotriton"; exit 1; }; \
+                     "widen the arch filter in build_aotriton"; \
+                test "${AOTRITON_ALLOW_PARTIAL_ARCH}" = "1" \
+                || exit 1; }; \
        done \
     && ls ${TORCH_LIB}/aotriton.images | sed 's/^amd-//' | paste -sd';' \
         > /app/aotriton_archs.txt \
-    && echo "AOTriton 0.13.50 (compat ABI) installed for: $(cat /app/aotriton_archs.txt)" \
+    && echo "AOTriton ${AOTRITON_TAG} + ${AOTRITON_DB_TAG} gfx950 fwd DB, arches:" \
+        "$(cat /app/aotriton_archs.txt)" \
     && python3 -c "import torch; print(f'torch={torch.__version__}')"
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
 RUN ldconfig
+
+# Drop the patched runtime onto every stock file name. The wheels ship
+# libhsa-runtime64/libamdhip64 as hard links spread across _rocm_sdk_devel and
+# _rocm_sdk_core, and torch's RPATH reaches both, so overwrite each regular file in place
+# instead of re-pointing symlinks: our hip carries a different build suffix
+# (...60850-cf439e5 vs ...60850-0000000), so a symlink swap would leave the wheel's copy
+# reachable under its own name. The count check is there to fail loudly if a future SDK
+# lays the libraries out somewhere else, rather than shipping the stock runtime silently.
+RUN --mount=type=bind,from=build_rocm_runtime,src=/staging/lib,target=/rocm-runtime \
+    set -eux; \
+    ours_hsa=$(readlink -f /rocm-runtime/libhsa-runtime64.so.1); \
+    ours_hip=$(readlink -f /rocm-runtime/libamdhip64.so.7); \
+    patched=0; \
+    for d in "${SDK_DEV}/lib" "${SDK_CORE}/lib"; do \
+        [ -d "$d" ] || continue; \
+        for f in "$d"/libhsa-runtime64.so.1* "$d"/libamdhip64.so.7*; do \
+            [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+            case "$f" in *libhsa*) cp -f "$ours_hsa" "$f";; *) cp -f "$ours_hip" "$f";; esac; \
+            echo "patched $f"; \
+            patched=$((patched+1)); \
+        done; \
+    done; \
+    test "$patched" -ge 3; \
+    ldconfig; \
+    python3 -c "import ctypes; ctypes.CDLL('libhsa-runtime64.so.1').hsa_amd_signal_create_v2"; \
+    strings "$ours_hip" | grep -q 'Ordering edge signals'; \
+    echo "ROCr + clr ordering edge signals installed"
 
 ARG BASE_IMAGE
 ARG PYTHON_VERSION
@@ -430,16 +565,28 @@ ARG FA_BRANCH
 ARG FA_REPO
 ARG AITER_BRANCH
 ARG AITER_REPO
-ARG AOTRITON_BRANCH
-ARG AOTRITON_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCPROFILER_SDK_REPO
 ARG ROCPROFILER_SDK_COMMIT
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
+# The other four AOTriton ARGs are already in scope from the overlay block above.
+ARG AOTRITON_DB_SHA256
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ROCPROFILER_SDK_REPO: ${ROCPROFILER_SDK_REPO}" >> /app/versions.txt \
     && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_REPO: ${ROCM_RUNTIME_REPO}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
+    && echo "AOTRITON_REPO: ${AOTRITON_REPO}" >> /app/versions.txt \
+    && echo "AOTRITON_TAG: ${AOTRITON_TAG}" >> /app/versions.txt \
+    # Which tuning DB an image carries is otherwise unrecoverable after the build.
+    && echo "AOTRITON_DB_TAG: ${AOTRITON_DB_TAG} (gfx950 attn_fwd only)" >> /app/versions.txt \
+    && echo "AOTRITON_DB_SHA256: ${AOTRITON_DB_SHA256}" >> /app/versions.txt \
+    && echo "AOTRITON_ARCHS: $(cat /app/aotriton_archs.txt)" >> /app/versions.txt \
+    # Marks an iteration build so a partial-arch image cannot pass for a release.
+    && echo "AOTRITON_ALLOW_PARTIAL_ARCH: ${AOTRITON_ALLOW_PARTIAL_ARCH}" >> /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
     && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
@@ -453,9 +600,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
-    && echo "AOTRITON_BRANCH: ${AOTRITON_BRANCH}" >> /app/versions.txt \
-    && echo "AOTRITON_REPO: ${AOTRITON_REPO}" >> /app/versions.txt \
-    && echo "AOTRITON_ROCM_ARCH: $(cat /app/aotriton_archs.txt)" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
     # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
