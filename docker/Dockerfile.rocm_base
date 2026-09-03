@@ -416,15 +416,8 @@ RUN mkdir -p /staging/lib \
 ### AOTriton Build
 ###
 # torch 2.12 bundles AOTriton 0.11.2, whose mem-efficient attention is wrong on gfx950:
-# four test_prefix_prefill.py ALiBi ids miss atol=1e-6 by 3e-5 to 5e-4. The forward
-# kernel source is functionally identical between 0.11.2b and 0.13.50 on that path, so
-# the cause is the gfx950 forward tuning database, and swapping just that file closes
-# all four. See ~/claude/aotriton/CANDIDATES.md for the measurements.
-#
-# MEASURED COST, read before shipping this: on a 48-shape SDPA sweep the swap is a
-# median 15% slower than stock 0.11.2 and 19% slower in aggregate than the
-# AOTRITON_COMPAT_ABI_0_11 build of 0.13.50 that this stage replaces. It buys
-# correctness with throughput. The compat build was both correct and faster.
+# four test_prefix_prefill.py ALiBi ids miss atol=1e-6. Swapping only the gfx950 forward
+# tuning DB closes all four, and costs a median 15% on a 48-shape sweep. See CANDIDATES.md.
 FROM base AS build_aotriton
 ARG AOTRITON_REPO
 ARG AOTRITON_TAG
@@ -433,17 +426,9 @@ ARG AOTRITON_DB_SHA256
 ARG MAX_JOBS
 RUN git clone --depth 1 --branch ${AOTRITON_TAG} --recursive ${AOTRITON_REPO} aotriton
 WORKDIR /app/aotriton
-# The tuning database is a BUILD-TIME input, not a runtime file, so it has to be in
-# place before cmake configures. v3python/kernel/kdesc.py:translate_dataframe() derives
-# the set of kernel signatures to compile straight from the database rows, which is why
-# this swap changes what gets built at all (21216 -> 23162 ninja targets). Copying the
-# file into a finished image would do nothing whatsoever.
-#
-# Pinned to a tag, not a branch: the database decides which kernels exist, so a moving
-# tip would silently change the contents of the image. The sha256 check is what makes
-# that failure loud. Note the directory was renamed between the two versions --
-# modules/database in 0.13.50, v3python/database in 0.11.2b -- so this copies one file
-# to a different path, it does not merge trees.
+# The tuning DB is a BUILD-TIME input: kdesc.py:translate_dataframe() derives the kernel
+# signatures to compile from its rows (21216 -> 23162 targets), so it must land before
+# cmake. Pinned to a tag with a sha256 check; the database dir was renamed in 0.13.50.
 RUN DST=v3python/database/amd/gfx950/flash/attn_fwd.sqlite3.tar.xz \
     && test -f ${DST} \
     && git fetch --depth 1 origin refs/tags/${AOTRITON_DB_TAG} \
@@ -452,11 +437,9 @@ RUN DST=v3python/database/amd/gfx950/flash/attn_fwd.sqlite3.tar.xz \
     && echo "gfx950 attn_fwd tuning DB <- ${AOTRITON_DB_TAG}"
 RUN pip install -r requirements.txt \
     && pip wheel third_party/triton -w /app/aotriton/triton_wheel
-# Only the CDNA arches, the ones the torch wheels ship aotriton.images for -- same
-# filter build_fa uses, and compiling the Triton kernel images costs hours per arch.
-# AOTRITON_COMPAT_ABI_0_11 is deliberately absent: 0.11.2b already is the ABI and the
-# SONAME torch links against, which is the point of building this tag. NO_PYTHON is
-# kept because that is the configuration the accuracy result was measured with.
+# Only the CDNA arches, the ones the torch wheels ship aotriton.images for -- same filter
+# build_fa uses. AOTRITON_COMPAT_ABI_0_11 is deliberately absent: 0.11.2b already is the
+# ABI and SONAME torch links against. NO_PYTHON matches how the accuracy was measured.
 RUN cmake -S . -B build -G Ninja \
         -DCMAKE_INSTALL_PREFIX=/app/aotriton/install_dir \
         -DCMAKE_BUILD_TYPE=Release \
@@ -501,16 +484,9 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
-# Swap our AOTriton in. Same 0.11.2 SONAME and same images layout as the wheel's copy,
-# but the two are a matched pair and must move together: the autotune lookup tables are
-# compiled into the .so and they index the kernel images by name, so a new .so against
-# the wheel's images would select variants that are not there. Replaced wholesale, not
-# merged. The import is the real test -- libtorch_hip DT_NEEDEDs
-# libaotriton_v2.so.0.11.2, so a bad library fails to resolve.
-# Declared here rather than in the versions.txt block below because this RUN needs them.
-ARG AOTRITON_REPO
-ARG AOTRITON_TAG
-ARG AOTRITON_DB_TAG
+# Swap our AOTriton in. The .so and aotriton.images are a matched pair -- the autotune
+# LUTs are compiled into the .so and index the images by name -- so replace wholesale,
+# never merge. The torch import below is the real test: libtorch_hip DT_NEEDEDs the .so.
 ARG AOTRITON_ALLOW_PARTIAL_ARCH
 RUN --mount=type=bind,from=build_aotriton,src=/app/install/aotriton,target=/aotriton \
     TORCH_LIB=$(python3 -c "import torch, os; print(os.path.dirname(torch.__file__))")/lib \
@@ -527,10 +503,8 @@ RUN --mount=type=bind,from=build_aotriton,src=/app/install/aotriton,target=/aotr
                 test "${AOTRITON_ALLOW_PARTIAL_ARCH}" = "1" \
                 || exit 1; }; \
        done \
-    && ls ${TORCH_LIB}/aotriton.images | sed 's/^amd-//' | paste -sd';' \
-        > /app/aotriton_archs.txt \
-    && echo "AOTriton ${AOTRITON_TAG} + ${AOTRITON_DB_TAG} gfx950 fwd DB, arches:" \
-        "$(cat /app/aotriton_archs.txt)" \
+    && echo "AOTriton arches:" \
+        "$(ls ${TORCH_LIB}/aotriton.images | sed 's/^amd-//' | paste -sd';')" \
     && python3 -c "import torch; print(f'torch={torch.__version__}')"
 
 COPY --from=build_rocprofiler_sdk /staging/ /opt/rocm/
@@ -583,22 +557,12 @@ ARG ROCPROFILER_SDK_REPO
 ARG ROCPROFILER_SDK_COMMIT
 ARG ROCM_RUNTIME_REPO
 ARG ROCM_RUNTIME_COMMIT
-# The other four AOTriton ARGs are already in scope from the overlay block above.
-ARG AOTRITON_DB_SHA256
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "ROCPROFILER_SDK_REPO: ${ROCPROFILER_SDK_REPO}" >> /app/versions.txt \
     && echo "ROCPROFILER_SDK_COMMIT: ${ROCPROFILER_SDK_COMMIT}" >> /app/versions.txt \
     && echo "ROCM_RUNTIME_REPO: ${ROCM_RUNTIME_REPO}" >> /app/versions.txt \
     && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
-    && echo "AOTRITON_REPO: ${AOTRITON_REPO}" >> /app/versions.txt \
-    && echo "AOTRITON_TAG: ${AOTRITON_TAG}" >> /app/versions.txt \
-    # Which tuning DB an image carries is otherwise unrecoverable after the build.
-    && echo "AOTRITON_DB_TAG: ${AOTRITON_DB_TAG} (gfx950 attn_fwd only)" >> /app/versions.txt \
-    && echo "AOTRITON_DB_SHA256: ${AOTRITON_DB_SHA256}" >> /app/versions.txt \
-    && echo "AOTRITON_ARCHS: $(cat /app/aotriton_archs.txt)" >> /app/versions.txt \
-    # Marks an iteration build so a partial-arch image cannot pass for a release.
-    && echo "AOTRITON_ALLOW_PARTIAL_ARCH: ${AOTRITON_ALLOW_PARTIAL_ARCH}" >> /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
     && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
