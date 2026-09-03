@@ -12,6 +12,11 @@ ARG AITER_BRANCH="v0.1.19"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 ARG MORI_BRANCH="f95cd5e0ca7b730f92f9ffdfb358484d6965d9f7" # TheRock compatible v1.1.0
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+# ROCr + clr with GPU-resident ordering edge signals, which cut dispatch latency in
+# vllm-project/vllm#53712. dev0902 is the same change rock-312-ci shipped off the 7.14
+# branch, rebased onto a newer rocm-systems to match the ROCm 10 SDK.
+ARG ROCM_RUNTIME_REPO="https://github.com/mawong-amd/rocm-systems.git"
+ARG ROCM_RUNTIME_COMMIT="9f2d52f4b7230c9da0ea43a0f9237cc9be58fffd" # dev0902/hsa_gpu_edge_signal
 
 
 # TheRock configuration
@@ -307,6 +312,67 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 
+# The SDK arrives as TheRock wheels, so this builds against ${ROCM_PATH} and the sysdeps
+# the wheels bundle rather than against /opt/rocm.
+FROM base AS build_rocm_runtime
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
+ARG MAX_JOBS
+# clr calls find_package(OpenGL REQUIRED) whether or not GL interop is wanted, and ROCr's
+# header codegen wants CppHeaderParser and xxd. elf, drm and numa deliberately come from
+# the SDK's rocm_sysdeps and not from apt, so the rebuilt libraries carry the same
+# librocm_sysdeps_* DT_NEEDED entries as the wheels' own.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libgl-dev libglx-dev mesa-common-dev xxd \
+    && rm -rf /var/lib/apt/lists/*
+RUN pip install --no-cache-dir CppHeaderParser
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCM_RUNTIME_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocr-runtime projects/clr projects/hip shared cmake \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCM_RUNTIME_COMMIT} \
+    && git checkout -q FETCH_HEAD
+# ROCr first, and installed over the SDK, because clr's rocrctx.hpp needs the
+# hsa_amd_signal_create_desc_t that this adds to hsa_ext_amd.h.
+RUN cd /src/projects/rocr-runtime \
+    && PKG_CONFIG_PATH=${ROCM_PATH}/lib/rocm_sysdeps/lib/pkgconfig \
+       cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_PREFIX_PATH="${ROCM_PATH}/lib/rocm_sysdeps;${ROCM_PATH}" \
+        -DCMAKE_INSTALL_PREFIX="${ROCM_PATH}" \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/rocm_sysdeps/lib' \
+    && cmake --build build --parallel ${MAX_JOBS:-$(nproc)} \
+    && cmake --install build \
+    && cmake --install build --prefix /rocr-install --strip
+# ROCM_KPACK_ENABLED is off by default upstream but on in the wheels: without it hip
+# refuses the split device code in the amd-torch-device-gfx* packages with
+# "Kpack code object but ROCM_KPACK_ENABLED=OFF".
+RUN cd /src/projects/clr \
+    && PKG_CONFIG_PATH=${ROCM_PATH}/lib/rocm_sysdeps/lib/pkgconfig \
+       cmake -B build -G Ninja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_COMMON_DIR=/src/projects/hip \
+        -DROCM_PATH="${ROCM_PATH}" \
+        -DCMAKE_PREFIX_PATH="${ROCM_PATH}/lib/rocm_sysdeps;${ROCM_PATH}" \
+        -DCMAKE_INSTALL_PREFIX="${ROCM_PATH}" \
+        -DHIP_LLVM_ROOT="${ROCM_PATH}/lib/llvm" \
+        -DPROF_API_HEADER_PATH="${ROCM_PATH}/include/roctracer/ext" \
+        -DROCM_KPACK_ENABLED=ON \
+        -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN:$ORIGIN/rocm_sysdeps/lib:$ORIGIN/llvm/lib' \
+    && cmake --build build --parallel ${MAX_JOBS:-$(nproc)} \
+    && cmake --install build --prefix /clr-install --strip
+RUN mkdir -p /staging/lib \
+    && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
+    && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
+    && ls -l /staging/lib
+
 FROM base AS final
 
 # Torch's Requires-Dist names the index triton, so a plain install of the whole debs dir
@@ -335,24 +401,31 @@ RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     && python3 -c "import triton; print(f'triton={triton.__version__}')" \
     && pip list 2>/dev/null | grep -iE '^(torch|triton) '
 
-# The ROCm 10 wheels ship stock AOTriton 0.13.50, so the compat rebuild the 7.14
-# wheels needed is gone. 0.11.2 was the version whose mem-efficient attention returned
-# different answers for identical inputs on gfx950; the fix landed in 0.12b. Guard both
-# halves -- the version, and that every arch we target actually got kernel images,
-# which arrive in the separate amd-torch-device-<arch> wheels. Only CDNA ships those,
-# so strip gfx1* the same way the FlashAttention stage does.
-RUN TORCH_LIB=$(python3 -c "import torch, os; print(os.path.dirname(torch.__file__))")/lib \
-    && AOTRITON_VERSION=$(strings ${TORCH_LIB}/libaotriton_v2.so.* \
-        | sed -n 's/^AOTriton \([0-9][0-9.]*\)$/\1/p' | sort -uV | tail -1) \
-    && echo "AOTriton: ${AOTRITON_VERSION:-<not found>}" \
-    && { test "$(printf '0.12\n%s\n' "${AOTRITON_VERSION}" | sort -V | head -1)" = "0.12" \
-         || { echo "AOTriton predates the gfx950 fix in 0.12b; pin a newer wheel"; exit 1; }; } \
-    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | sed -e 's/;gfx1[0-9]\{3\}//g' | tr ';' ' '); do \
-           test -f ${TORCH_LIB}/aotriton.images/amd-${arch}/flash/attn_fwd.zip \
-           || { echo "no AOTriton images for ${arch}; amd-torch-device-${arch} missing"; exit 1; }; \
-       done \
-    && echo "${AOTRITON_VERSION}" > /app/aotriton_version.txt \
-    && python3 -c "import torch; print(f'torch={torch.__version__}')"
+# Drop the patched runtime onto every stock file name. The wheels ship
+# libhsa-runtime64/libamdhip64 as hard links spread across _rocm_sdk_devel and
+# _rocm_sdk_core, and torch's RPATH reaches both, so overwrite each regular file in place
+# instead of re-pointing symlinks: our hip carries a different build suffix, so a symlink
+# swap would leave the wheel's copy reachable under its own name. The count check fails
+# loudly if a future SDK moves the libraries, rather than shipping stock silently.
+RUN --mount=type=bind,from=build_rocm_runtime,src=/staging/lib,target=/rocm-runtime \
+    set -eux; \
+    ours_hsa=$(readlink -f /rocm-runtime/libhsa-runtime64.so.1); \
+    ours_hip=$(readlink -f /rocm-runtime/libamdhip64.so.7); \
+    patched=0; \
+    for d in "${SDK_DEV}/lib" "${SDK_CORE}/lib"; do \
+        [ -d "$d" ] || continue; \
+        for f in "$d"/libhsa-runtime64.so.1* "$d"/libamdhip64.so.7*; do \
+            [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+            case "$f" in *libhsa*) cp -f "$ours_hsa" "$f";; *) cp -f "$ours_hip" "$f";; esac; \
+            echo "patched $f"; \
+            patched=$((patched+1)); \
+        done; \
+    done; \
+    test "$patched" -ge 3; \
+    ldconfig; \
+    python3 -c "import ctypes; ctypes.CDLL('libhsa-runtime64.so.1').hsa_amd_signal_create_v2"; \
+    strings "$ours_hip" | grep -q 'Ordering edge signals'; \
+    echo "ROCr + clr ordering edge signals installed"
 
 RUN ldconfig
 
@@ -370,6 +443,8 @@ ARG AITER_BRANCH
 ARG AITER_REPO
 ARG MORI_BRANCH
 ARG MORI_REPO
+ARG ROCM_RUNTIME_REPO
+ARG ROCM_RUNTIME_COMMIT
 # Record hashes for Triton and pybind11 so we can verify later.
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
@@ -383,9 +458,11 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "FA_REPO: ${FA_REPO}" >> /app/versions.txt \
     && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
     && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt \
-    && echo "AOTRITON_VERSION: $(cat /app/aotriton_version.txt) (stock, from the torch wheel)" >> /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
+    # Which runtime an image carries is otherwise unrecoverable after the build.
+    && echo "ROCM_RUNTIME_REPO: ${ROCM_RUNTIME_REPO}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
     # Fingerprint our triton so Dockerfile.rocm can prove it survived the build.
     && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "TRITON_SHA256: $(find $(python3 -c 'import triton, os; print(os.path.dirname(triton.__file__))') \
