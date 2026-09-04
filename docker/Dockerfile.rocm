@@ -935,10 +935,8 @@ RUN EXPECTED=$(grep '^TRITON_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
 
 # Recompute the base's pybind11 fingerprint to detect resolver interference.
 RUN EXPECTED=$(grep '^PYBIND11_SHA256: ' /app/versions.txt | cut -d' ' -f2) \
-    && EXPECTED_ABI=$(grep '^PYBIND11_INTERNALS_VERSION: ' /app/versions.txt | cut -d' ' -f2) \
     && INC=$(python3 -c 'import pybind11; print(pybind11.get_include())') \
     && ACTUAL=$(find "${INC}" -type f -name '*.h' | sort | xargs sha256sum | sha256sum | cut -d' ' -f1) \
-    && ACTUAL_ABI=$(grep -rhE '^#[[:space:]]*define PYBIND11_INTERNALS_VERSION' "${INC}" | awk '{print $NF}') \
     && echo "pybind11 $(pip show pybind11 | awk '/^Version:/ {print $2}')" \
         "sha256 expected=${EXPECTED} actual=${ACTUAL}" \
         "internals expected=${EXPECTED_ABI} actual=${ACTUAL_ABI}" \

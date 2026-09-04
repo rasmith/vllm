@@ -245,8 +245,6 @@ RUN git clone --recursive --branch ${AITER_BRANCH} ${AITER_REPO}
 RUN cd aiter \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
-# AITER_USE_SYSTEM_TRITON keeps setup.py off the index triton, which would
-# otherwise displace the one we built.
 RUN pip install pyyaml && cd aiter \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
@@ -300,7 +298,6 @@ RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install $(ls /install/*.whl | grep -v '/triton-') \
     && pip install --no-deps --force-reinstall /install/triton-*.whl \
-    # With the pin gone this must be clean, so any complaint is real.
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     # Create a constraints file to protect the versions we need, especially
     # triton, requirements will try to reinstall repeatedly.
