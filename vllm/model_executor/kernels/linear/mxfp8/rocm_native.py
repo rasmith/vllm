@@ -129,6 +129,9 @@ def _select_cfg(M, N, K):
     large-K prefill uses BLOCK_K=256; short-K (K=768) widens N. BLOCK_K must divide K
     (the K-loop is unmasked), so every BLOCK_K below is guarded to be K-divisible
     (served K: 384/768/1024/2048/6144).
+
+    Triton >=3.8 enables direct-to-LDS async copy by default on gfx950, which costs
+    one extra LDS buffer, so 128x128x256 is capped at num_stages=2 (160 KiB limit).
     """
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
@@ -166,7 +169,7 @@ def _select_cfg(M, N, K):
         # 3.6; on triton 3.7 its large BLOCK_M register/LDS footprint spills or hits
         # "out of resources", so use 128x128x256 -- within the known-good footprint.)
         if M >= 4096 and K >= 1024 and K % 256 == 0 and occ >= 256:
-            return 128, 128, 256, 8, 3
+            return 128, 128, 256, 8, 2
         return 128, 128, 128, 8, 3
     # large-K (K >= 2048). BLOCK_K is K-divisibility-guarded (the K-loop is unmasked):
     # served large-K is 2048/6144 (%256==0), but fall back to 128 (always divides, since
@@ -186,7 +189,7 @@ def _select_cfg(M, N, K):
     # Covers the qkv-class local N=1536 (TP=8 qkv / TP=4 shared_gate_up) and the deep-K
     # / very-large-M shapes.
     if K % 256 == 0 and (1280 < N <= 1536 or (occ >= 128 and (K >= 4096 or M >= 4096))):
-        return 128, 128, 256, 8, 3
+        return 128, 128, 256, 8, 2
     # small local-N (e.g. TP=8 shared_gate_up N=768): a 64-wide BLOCK_N doubles the
     # N-tile count -> better CU fill than 128x128 at this mid-large M (~1.4x there).
     if N <= 1024 and K % 256 == 0:

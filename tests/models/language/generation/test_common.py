@@ -12,6 +12,14 @@ from ....utils import large_gpu_mark
 from ...registry import HF_EXAMPLE_MODELS
 from ...utils import check_logprobs_close
 
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx950
+else:
+
+    def on_gfx950() -> bool:
+        return False
+
+
 # Models that require embedding scaling for prompt_embeds test
 EMBED_SCALING_MODELS = {
     "openbmb/MiniCPM4.1-8B",
@@ -218,11 +226,17 @@ def test_models(
                 prompt_embeds, max_tokens, num_logprobs
             )
 
+    # On MI355 with The Rock 7.14, overlaps stop at token 27.
+    # Issue arises due to hipblaslt kernel selections differences between ROCm
+    # versions.
+    skip_last_tokens_0 = 0 if not on_gfx950() else 5
+
     check_logprobs_close(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
         name_1="vllm",
+        skip_last_tokens_0=skip_last_tokens_0,
     )
     if prompt_embeds is not None:
         check_logprobs_close(
