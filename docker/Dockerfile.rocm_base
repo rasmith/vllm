@@ -259,8 +259,29 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
+# Effectively revert triton #9724 (2a995a8ae0, "[AMD] Enable f32 vectorized reduction
+# path for CDNA2-4"), which reassociates f32 reductions on gfx942 with no flag and no
+# opt-out. It shifts the flex-attention online-softmax normaliser by ~1 bf16 ULP, which
+# the model amplifies into a cross-encoder score change that reds Entrypoints Pooling;
+# measured gain on the kernel it affects is 0.13%. These two deletions collapse
+#
+#     bool TargetFeatures::supportBitwidth32Elementwise() const {
+#       switch (getISAFamily()) {
+#       case ISAFamily::CDNA2: case ISAFamily::CDNA3: case ISAFamily::CDNA4:
+#       case ISAFamily::GFX1250:  return true;
+#       default:                  return false;
+#       }
+#     }
+#
+# down to an unconditional `return false`. Note that also turns the path off for
+# GFX1250, which had it before #9724; that is wider than a strict revert but does not
+# affect the CDNA targets this image is built for.
+#
+# The line numbers are those of TRITON_BRANCH 0d631838 -- recheck them if that pin moves.
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
+    && sed -i '310,316d' third_party/amd/lib/Dialect/TritonAMDGPU/IR/TargetFeatures.cpp \
+    && sed -i '311d' third_party/amd/lib/Dialect/TritonAMDGPU/IR/TargetFeatures.cpp \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
