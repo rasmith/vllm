@@ -117,7 +117,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
-    VLLM_USE_AOT_COMPILE: bool = False
+    VLLM_USE_AOT_COMPILE: bool = True
     VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
@@ -1261,7 +1261,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         in ("true", "1")
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER", "True").lower() in ("true", "1")
     ),
     # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
     # CudaCommunicator on ROCm. Also enables AITER AG/RS for DP communication.
