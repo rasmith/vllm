@@ -503,9 +503,24 @@ def select_fp8_moe_backend(
                 AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
+            reason = None
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, config, weight_key, activation_key, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend))
+                    return backend, k_cls
+            # AITER was requested but cannot run this configuration (e.g. a
+            # biased MoE). Fall back to the remaining backends in priority order
+            # instead of failing engine init, as the unquantized oracle does.
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_MOE=1 was requested, but %s "
+                "Falling back to the remaining FP8 MoE backends.",
+                _make_log_unsupported(backend, reason),
             )
+            if Fp8MoeBackend.AITER in AVAILABLE_BACKENDS:
+                AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)

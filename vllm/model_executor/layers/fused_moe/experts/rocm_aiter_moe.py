@@ -466,6 +466,15 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         is_supported, reason = super().is_supported_config(
             cls, moe_config, weight_key, activation_key, activation_format
         )
+        # Biases only supported on AITER MXFP4 path.
+        if (
+            is_supported
+            and moe_config.has_bias
+            and not (weight_key == kMxfp4Static and activation_key is None)
+        ):
+            return False, (
+                f"AiterExperts only supports bias for kMxfp4Static, not {weight_key}."
+            )
         if not is_supported and not rocm_aiter_ops.is_fused_moe_enabled():
             reason = (
                 f"{reason}. AITER MoE is not enabled — "
