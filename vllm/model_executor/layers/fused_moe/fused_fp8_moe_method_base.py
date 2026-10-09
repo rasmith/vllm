@@ -15,10 +15,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class FusedFp8MoEMethodBase(FusedMoEMethodBase):
-    """Base for FP8 MoE quant methods.
-
-    Rounds the layer sizes up to the selected FP8 backend's alignment. Subclasses
-    set ``fp8_backend`` and ``weight_quant_key`` in ``__init__``.
+    """Base for FP8 MoE quant methods; rounds the layer sizes up to the FP8
+    backend's alignment. Subclasses set ``fp8_backend`` and ``weight_quant_key``.
     """
 
     fp8_backend: Fp8MoeBackend

@@ -81,14 +81,9 @@ def fp8_moe_round_up_sizes(
     hidden_size: int,
     intermediate_size: int,
 ) -> tuple[int, int]:
-    """Round sizes up to the alignment of AITER's per-tensor FP8 MoE kernel.
-
-    AITER runs per-tensor fp8 MoE on its CK 2-stage GEMM, which has no kernel
-    instance unless hidden_size % 128 == 0 and intermediate_size % 256 == 0
-    (% 128 for SwiGLU); other sizes fail with "device_gemm with the specified
-    compilation parameters does not support this GEMM problem". Sizes that
-    already fit are returned unchanged, so models that run today are not padded.
-    """
+    """Round sizes up to AITER's per-tensor FP8 MoE (CK 2-stage GEMM) alignment:
+    hidden % 128 and intermediate % 256 (% 128 for SwiGLU). Aligned sizes are
+    returned unchanged."""
     intermediate_alignment = (
         128
         if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
@@ -107,9 +102,7 @@ def maybe_round_up_hidden_size_and_intermediate_size(
     intermediate_size: int,
 ) -> tuple[int, int]:
     """Round up dimensions before allocation to satisfy the selected kernel.
-
-    The padded weights must be zero-initialized.
-    """
+    The padded weights must be zero-initialized."""
     if backend == Fp8MoeBackend.AITER and weight_key == kFp8StaticTensorSym:
         return fp8_moe_round_up_sizes(activation, hidden_size, intermediate_size)
     return hidden_size, intermediate_size
@@ -120,11 +113,9 @@ def maybe_zero_moe_weight_padding(
     w13: torch.Tensor,
     w2: torch.Tensor,
 ) -> None:
-    """Zero the padding added by maybe_roundup_sizes.
-
-    The loader writes only the checkpoint's rows/columns (also on a reload), and
-    the rest of the torch.empty allocation is live weight for the kernel.
-    """
+    """Zero the padding added by maybe_roundup_sizes. The loader writes only the
+    checkpoint's rows/columns, and the rest of the torch.empty allocation is
+    live weight for the kernel."""
     inter = moe_config.intermediate_size_per_partition_unpadded
     inter_padded = moe_config.intermediate_size_per_partition
     hidden = moe_config.hidden_dim_unpadded

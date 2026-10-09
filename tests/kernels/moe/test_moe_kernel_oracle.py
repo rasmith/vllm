@@ -57,12 +57,9 @@ class TestUnquantizedDelegation:
         assert out is sentinel_kernel
 
 
-# FP8 per-tensor weight alignment tests -----------------------------------
-#
-# AITER runs per-tensor FP8 MoE on its CK 2stages GEMM, which has no kernel
-# instance unless hidden % 128 == 0 and intermediate % 256 == 0 (% 128 for
-# SwiGLU). The FP8 MoE methods round misaligned sizes up in
-# ``maybe_roundup_sizes`` and leave aligned ones alone.
+# FP8 per-tensor weight alignment tests. AITER's CK 2-stage FP8 MoE GEMM needs
+# hidden % 128 == 0 and intermediate % 256 == 0 (% 128 for SwiGLU), so
+# ``maybe_roundup_sizes`` rounds misaligned sizes up and leaves aligned ones alone.
 
 
 @pytest.mark.parametrize(
