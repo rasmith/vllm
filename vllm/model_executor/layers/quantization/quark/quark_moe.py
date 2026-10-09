@@ -26,6 +26,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_fp8_moe_method_base import (
+    FusedFp8MoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -580,7 +583,7 @@ class QuarkW4A16Int4MoEMethod(QuarkMoEMethod):
         return quark_int4_weight_loader
 
 
-class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
+class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod, FusedFp8MoEMethodBase):
     supported_activation_quant_keys = [
         kFp8StaticTensorSym,
         kFp8DynamicTensorSym,

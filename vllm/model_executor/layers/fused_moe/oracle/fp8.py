@@ -11,6 +11,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -37,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -72,6 +74,72 @@ class Fp8MoeBackend(Enum):
     TRITON_MXFP8 = "TRITON_MXFP8"
     # MXFP8 MoE via AITER (FlyDSL two-stage grouped GEMM) on gfx950.
     AITER_MXFP8 = "AITER_MXFP8"
+
+
+def fp8_moe_round_up_sizes(
+    activation: MoEActivation,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round sizes up to the alignment of AITER's per-tensor FP8 MoE kernel.
+
+    AITER runs per-tensor fp8 MoE on its CK 2-stage GEMM, which has no kernel
+    instance unless hidden_size % 128 == 0 and intermediate_size % 256 == 0
+    (% 128 for SwiGLU); other sizes fail with "device_gemm with the specified
+    compilation parameters does not support this GEMM problem". Sizes that
+    already fit are returned unchanged, so models that run today are not padded.
+    """
+    intermediate_alignment = (
+        128
+        if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
+        else 256
+    )
+    return round_up(hidden_size, 128), round_up(
+        intermediate_size, intermediate_alignment
+    )
+
+
+def maybe_round_up_hidden_size_and_intermediate_size(
+    backend: Fp8MoeBackend,
+    weight_key: QuantKey | None,
+    activation: MoEActivation,
+    hidden_size: int,
+    intermediate_size: int,
+) -> tuple[int, int]:
+    """Round up dimensions before allocation to satisfy the selected kernel.
+
+    The padded weights must be zero-initialized.
+    """
+    if backend == Fp8MoeBackend.AITER and weight_key == kFp8StaticTensorSym:
+        return fp8_moe_round_up_sizes(activation, hidden_size, intermediate_size)
+    return hidden_size, intermediate_size
+
+
+def maybe_zero_moe_weight_padding(
+    moe_config: FusedMoEConfig,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> None:
+    """Zero the padding added by maybe_roundup_sizes.
+
+    The loader writes only the checkpoint's rows/columns (also on a reload), and
+    the rest of the torch.empty allocation is live weight for the kernel.
+    """
+    inter = moe_config.intermediate_size_per_partition_unpadded
+    inter_padded = moe_config.intermediate_size_per_partition
+    hidden = moe_config.hidden_dim_unpadded
+    hidden_padded = moe_config.hidden_dim
+    assert inter is not None and hidden is not None, (
+        f"The unpadded MoE sizes are not set (inter={inter}, hidden={hidden})."
+    )
+    if inter_padded > inter:
+        w13[:, inter:inter_padded].zero_()
+        if moe_config.is_act_and_mul:
+            w13[:, inter_padded + inter :].zero_()
+        w2[:, :, inter:].zero_()
+    if hidden_padded > hidden:
+        w13[:, :, hidden:].zero_()
+        w2[:, hidden:].zero_()
 
 
 def _get_priority_backends(
@@ -596,6 +664,7 @@ def convert_to_fp8_moe_kernel_format(
             tuple(layer.weight_block_size),
         )
     elif fp8_backend == Fp8MoeBackend.AITER:
+        maybe_zero_moe_weight_padding(layer.moe_config, w13, w2)
         w13, w2 = rocm_aiter_ops.shuffle_weights(w13, w2)
         w13.is_shuffled = True
         w2.is_shuffled = True

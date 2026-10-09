@@ -17,13 +17,15 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
     RoutedExperts,
     SharedExperts,
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.fused_fp8_moe_method_base import (
+    FusedFp8MoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
@@ -461,7 +463,7 @@ class Fp8LinearMethod(LinearMethodBase):
         return self.fp8_linear.apply_weights(layer, x, bias)
 
 
-class Fp8MoEMethod(FusedMoEMethodBase):
+class Fp8MoEMethod(FusedFp8MoEMethodBase):
     """MoE method for FP8.
     Supports loading FP8 checkpoints with static weight scale and
     dynamic/static activation scale.
@@ -515,6 +517,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
         # Select Fp8 MoE backend
+        self.weight_quant_key = weight_key
         self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
             config=self.moe,
             weight_key=weight_key,
