@@ -81,9 +81,8 @@ def fp8_moe_round_up_sizes(
     hidden_size: int,
     intermediate_size: int,
 ) -> tuple[int, int]:
-    """Round sizes up to AITER's per-tensor FP8 MoE (CK 2-stage GEMM) alignment:
-    hidden % 128 and intermediate % 256 (% 128 for SwiGLU). Aligned sizes are
-    returned unchanged."""
+    """Round hidden up to 128 and intermediate up to 256 (128 for SwiGLU) for
+    AITER's per-tensor FP8 MoE kernel."""
     intermediate_alignment = (
         128
         if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
@@ -113,9 +112,8 @@ def maybe_zero_moe_weight_padding(
     w13: torch.Tensor,
     w2: torch.Tensor,
 ) -> None:
-    """Zero the padding added by maybe_roundup_sizes. The loader writes only the
-    checkpoint's rows/columns, and the rest of the torch.empty allocation is
-    live weight for the kernel."""
+    """Zero the padding added by maybe_roundup_sizes, since the loader only
+    fills the checkpoint's part of the weights."""
     inter = moe_config.intermediate_size_per_partition_unpadded
     inter_padded = moe_config.intermediate_size_per_partition
     hidden = moe_config.hidden_dim_unpadded
