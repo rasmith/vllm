@@ -132,10 +132,10 @@ def test_gsm8k_correctness(config_filename):
             )
     if (
         not current_platform.is_rocm()
-        and "Qwen3-30B-A3B-Thinking-2507-FP8-AITER-TP2" in config_filename.name
+        and "Qwen3-30B-A3B-Thinking-2507-FP8-TP2" in config_filename.name
     ):
         pytest.skip(
-            "Skipping Qwen3-30B-A3B-Thinking-2507-FP8-AITER-TP2 on non-ROCm platforms. "
+            "Skipping Qwen3-30B-A3B-Thinking-2507-FP8-TP2 on non-ROCm platforms. "
             "It is a Quark checkpoint."
         )
     if "--all2all-backend=moonep" in eval_config.get("server_args", ""):
