@@ -38,6 +38,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.utils import replace_parameter
@@ -82,7 +83,7 @@ def fp8_moe_round_up_sizes(
     intermediate_size: int,
 ) -> tuple[int, int]:
     """Round hidden up to 128 and intermediate up to 256 (128 for SwiGLU) for
-    AITER's per-tensor FP8 MoE kernel."""
+    AITER's FP8 MoE kernel."""
     intermediate_alignment = (
         128
         if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
@@ -102,7 +103,14 @@ def maybe_round_up_hidden_size_and_intermediate_size(
 ) -> tuple[int, int]:
     """Round up dimensions before allocation to satisfy the selected kernel.
     The padded weights must be zero-initialized."""
-    if backend == Fp8MoeBackend.AITER and weight_key == kFp8StaticTensorSym:
+    # These run on AITER's CK GEMM, which needs aligned sizes.
+    if backend == Fp8MoeBackend.AITER and (
+        weight_key == kFp8StaticTensorSym
+        or (
+            weight_key == kFp8StaticChannelSym
+            and activation == MoEActivation.GELU_TANH
+        )
+    ):
         return fp8_moe_round_up_sizes(activation, hidden_size, intermediate_size)
     return hidden_size, intermediate_size
 

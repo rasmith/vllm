@@ -57,22 +57,27 @@ class TestUnquantizedDelegation:
         assert out is sentinel_kernel
 
 
-# FP8 per-tensor weight alignment tests. AITER's CK 2-stage FP8 MoE GEMM needs
-# hidden % 128 == 0 and intermediate % 256 == 0 (% 128 for SwiGLU), so
-# ``maybe_roundup_sizes`` rounds misaligned sizes up and leaves aligned ones alone.
+# AITER's CK FP8 MoE GEMM (per-tensor, or per-channel with gelu_tanh) needs
+# hidden % 128 == 0 and intermediate % 256 == 0 (% 128 for SwiGLU).
 
 
 @pytest.mark.parametrize(
-    ("activation", "hidden", "intermediate", "expected"),
+    ("weight_key_name", "activation", "hidden", "intermediate", "expected"),
     [
-        ("SILU", 2048, 1536, (2048, 1536)),  # already aligned, untouched
-        ("SILU", 4096, 3072, (4096, 3072)),
-        ("SILU", 2048, 1408, (2048, 1536)),
-        ("SILU", 2048, 192, (2048, 256)),
-        ("GELU", 4096, 704, (4096, 768)),
-        ("SWIGLUOAI", 2048, 1408, (2048, 1408)),  # SwiGLU only needs 128
-        ("SWIGLUOAI", 2880, 2880, (2944, 2944)),
-        ("SWIGLUOAI_UNINTERLEAVE", 2880, 1440, (2944, 1536)),
+        # Per-tensor weights.
+        ("kFp8StaticTensorSym", "SILU", 2048, 1536, (2048, 1536)),  # aligned
+        ("kFp8StaticTensorSym", "SILU", 4096, 3072, (4096, 3072)),
+        ("kFp8StaticTensorSym", "SILU", 2048, 1408, (2048, 1536)),  # DeepSeek-V2-Lite
+        ("kFp8StaticTensorSym", "SILU", 2048, 384, (2048, 512)),  # Qwen3-30B-A3B TP2
+        ("kFp8StaticTensorSym", "SILU", 2048, 192, (2048, 256)),
+        ("kFp8StaticTensorSym", "GELU", 4096, 704, (4096, 768)),
+        ("kFp8StaticTensorSym", "SWIGLUOAI", 2048, 1408, (2048, 1408)),  # needs 128
+        ("kFp8StaticTensorSym", "SWIGLUOAI", 2880, 2880, (2944, 2944)),  # gpt-oss
+        ("kFp8StaticTensorSym", "SWIGLUOAI_UNINTERLEAVE", 2880, 1440, (2944, 1536)),
+        # Per-channel weights: only gelu_tanh (DiffusionGemma-26B-A4B).
+        ("kFp8StaticChannelSym", "GELU_TANH", 2816, 704, (2816, 768)),  # TP1
+        ("kFp8StaticChannelSym", "GELU_TANH", 2816, 352, (2816, 512)),  # TP2
+        ("kFp8StaticChannelSym", "SILU", 2816, 704, (2816, 704)),  # not padded
     ],
 )
 @pytest.mark.parametrize(
@@ -88,20 +93,18 @@ class TestUnquantizedDelegation:
     ],
 )
 def test_maybe_round_up_hidden_size_and_intermediate_size(
-    backend_name, activation, hidden, intermediate, expected
+    backend_name, weight_key_name, activation, hidden, intermediate, expected
 ):
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
         maybe_round_up_hidden_size_and_intermediate_size,
     )
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        kFp8StaticTensorSym,
-    )
+    from vllm.model_executor.layers.quantization.utils import quant_utils
 
     actual = maybe_round_up_hidden_size_and_intermediate_size(
         Fp8MoeBackend[backend_name],
-        kFp8StaticTensorSym,
+        getattr(quant_utils, weight_key_name),
         MoEActivation[activation],
         hidden,
         intermediate,
@@ -116,25 +119,51 @@ _requires_aiter = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize(
-    ("backend_name", "weight_key_name", "expect_round_up"),
+    (
+        "backend_name",
+        "weight_key_name",
+        "activation_name",
+        "hidden",
+        "intermediate",
+        "expect_round_up",
+    ),
     [
-        pytest.param("AITER", "kFp8StaticTensorSym", True, marks=_requires_aiter),
-        ("TRITON", "kFp8StaticTensorSym", False),
-        pytest.param("AITER", "kFp8StaticChannelSym", False, marks=_requires_aiter),
-        pytest.param("AITER", "kFp8Static128BlockSym", False, marks=_requires_aiter),
+        # Per-tensor weights, DeepSeek-V2-Lite shape.
+        pytest.param(
+            "AITER", "kFp8StaticTensorSym", "SILU", 2048, 1408, True,
+            marks=_requires_aiter,
+        ),
+        ("TRITON", "kFp8StaticTensorSym", "SILU", 2048, 1408, False),
+        pytest.param(
+            "AITER", "kFp8StaticChannelSym", "SILU", 2048, 1408, False,
+            marks=_requires_aiter,
+        ),
+        pytest.param(
+            "AITER", "kFp8Static128BlockSym", "SILU", 2048, 1408, False,
+            marks=_requires_aiter,
+        ),
+        # Per-channel gelu_tanh, DiffusionGemma-26B-A4B shape.
+        pytest.param(
+            "AITER", "kFp8StaticChannelSym", "GELU_TANH", 2816, 704, True,
+            marks=_requires_aiter,
+        ),
+        pytest.param(
+            "AITER", "kFp8Static128BlockSym", "GELU_TANH", 2816, 704, False,
+            marks=_requires_aiter,
+        ),
+        ("TRITON", "kFp8StaticChannelSym", "GELU_TANH", 2816, 704, False),
     ],
 )
-@pytest.mark.parametrize(("hidden", "intermediate"), [(2880, 1408)])
-@pytest.mark.parametrize("activation_name", ["SILU"])
 def test_maybe_round_up_calls_fp8_moe_round_up_sizes_only_when_needed(
     backend_name,
     weight_key_name,
-    expect_round_up,
+    activation_name,
     hidden,
     intermediate,
-    activation_name,
+    expect_round_up,
 ):
-    """The AITER round-up is applied only to AITER with per-tensor weights."""
+    """Round up only for AITER with per-tensor weights, or per-channel weights
+    with gelu_tanh."""
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
         Fp8MoeBackend,
