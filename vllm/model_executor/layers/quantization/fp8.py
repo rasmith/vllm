@@ -29,8 +29,10 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
+    maybe_pad_fp8_moe_weights,
     resolve_fp8_moe_weight_block_shape,
     select_fp8_moe_backend,
+    update_fp8_moe_kernel_sizes,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -521,6 +523,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             activation_key=activation_key,
             allow_vllm_cutlass=False,
         )
+        self.weight_quant_key = weight_key
 
     def create_weights(
         self,
@@ -671,6 +674,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         w13_input_scale: torch.Tensor | None,
         w2_input_scale: torch.Tensor | None,
     ) -> None:
+        # Pad block-FP8 weights to the sizes the backend needs.
+        if self.block_quant:
+            w13, w2, w13_scale, w2_scale = maybe_pad_fp8_moe_weights(
+                self.moe,
+                self.fp8_backend,
+                self.weight_quant_key,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+            )
         # Shuffle weights to runtime format.
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.fp8_backend,
@@ -707,7 +721,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
-            # Weights are already in kernel format; rebuild the kernel only.
+            # Weights are already in kernel format (block FP8 padded); rebuild
+            # the kernel only.
+            if self.block_quant:
+                update_fp8_moe_kernel_sizes(
+                    self.moe, self.fp8_backend, self.weight_quant_key
+                )
             self._init_moe_kernel(layer)
             return
 
