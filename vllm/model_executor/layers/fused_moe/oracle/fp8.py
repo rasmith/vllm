@@ -124,7 +124,7 @@ def pad_fp8_moe_weights(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Zero-pad loaded FP8 expert weights, and their block scales, from their
     loaded sizes to the kernel's hidden and intermediate sizes."""
-    hidden, inter = w2.shape[1], w2.shape[2]
+    unpadded_hidden_size, unpadded_intermediate_size = w2.shape[1], w2.shape[2]
     num_shards = 2 if moe_config.is_act_and_mul else 1
 
     # Pad each of gate and up separately so up still starts at the padded offset.
@@ -133,22 +133,36 @@ def pad_fp8_moe_weights(
     )
     for shard in range(num_shards):
         padded_w13[
-            :, shard * intermediate_size : shard * intermediate_size + inter, :hidden
-        ] = w13[:, shard * inter : (shard + 1) * inter]
+            :,
+            shard * intermediate_size : shard * intermediate_size
+            + unpadded_intermediate_size,
+            :unpadded_hidden_size,
+        ] = w13[
+            :,
+            shard * unpadded_intermediate_size : (shard + 1)
+            * unpadded_intermediate_size,
+        ]
     padded_w2 = w2.new_zeros(w2.shape[0], hidden_size, intermediate_size)
-    padded_w2[:, :hidden, :inter] = w2
+    padded_w2[:, :unpadded_hidden_size, :unpadded_intermediate_size] = w2
 
     # Block scales are [E, out / block, in / block]; pad them by whole blocks.
-    if w13_scale.dim() == 3 and w13_scale.shape[1] != num_shards * inter:
-        block_n = num_shards * inter // w13_scale.shape[1]
-        block_k = cdiv(hidden, w13_scale.shape[2])
-        blocks, padded_blocks = inter // block_n, cdiv(intermediate_size, block_n)
+    if (
+        w13_scale.dim() == 3
+        and w13_scale.shape[1] != num_shards * unpadded_intermediate_size
+    ):
+        block_n = num_shards * unpadded_intermediate_size // w13_scale.shape[1]
+        block_k = cdiv(unpadded_hidden_size, w13_scale.shape[2])
+        blocks, padded_blocks = (
+            unpadded_intermediate_size // block_n,
+            cdiv(intermediate_size, block_n),
+        )
         padded_w13_scale = w13_scale.new_ones(
             w13_scale.shape[0], num_shards * padded_blocks, cdiv(hidden_size, block_k)
         )
         for shard in range(num_shards):
             padded_w13_scale[
-                :, shard * padded_blocks : shard * padded_blocks + blocks,
+                :,
+                shard * padded_blocks : shard * padded_blocks + blocks,
                 : w13_scale.shape[2],
             ] = w13_scale[:, shard * blocks : (shard + 1) * blocks]
         padded_w2_scale = w2_scale.new_ones(
@@ -167,12 +181,14 @@ def update_fp8_moe_kernel_sizes(
 ) -> tuple[int, int]:
     """Round the MoE config's hidden and intermediate sizes up to what the
     backend needs, so the activations are padded to match, and return them."""
-    hidden_size, intermediate_size = maybe_round_up_fp8_moe_hidden_size_and_intermediate_size(
-        backend,
-        weight_key,
-        moe_config.activation,
-        moe_config.hidden_dim,
-        moe_config.intermediate_size_per_partition,
+    hidden_size, intermediate_size = (
+        maybe_round_up_fp8_moe_hidden_size_and_intermediate_size(
+            backend,
+            weight_key,
+            moe_config.activation,
+            moe_config.hidden_dim,
+            moe_config.intermediate_size_per_partition,
+        )
     )
     moe_config.hidden_dim = hidden_size
     moe_config.intermediate_size_per_partition = intermediate_size
