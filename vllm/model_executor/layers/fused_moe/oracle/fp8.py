@@ -95,7 +95,7 @@ def fp8_moe_round_up_sizes(
     )
 
 
-def maybe_round_up_hidden_size_and_intermediate_size(
+def maybe_round_up_hidden_size_and_intermediate_size_fp8_moe(
     backend: Fp8MoeBackend,
     weight_key: QuantKey | None,
     activation: MoEActivation,
@@ -167,7 +167,7 @@ def update_fp8_moe_kernel_sizes(
 ) -> tuple[int, int]:
     """Round the MoE config's hidden and intermediate sizes up to what the
     backend needs, so the activations are padded to match, and return them."""
-    hidden_size, intermediate_size = maybe_round_up_hidden_size_and_intermediate_size(
+    hidden_size, intermediate_size = maybe_round_up_hidden_size_and_intermediate_size_fp8_moe(
         backend,
         weight_key,
         moe_config.activation,
