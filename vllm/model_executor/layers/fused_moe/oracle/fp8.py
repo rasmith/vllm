@@ -12,7 +12,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -44,7 +43,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -78,38 +77,19 @@ class Fp8MoeBackend(Enum):
     AITER_MXFP8 = "AITER_MXFP8"
 
 
-def fp8_moe_round_up_sizes(
-    activation: MoEActivation,
-    hidden_size: int,
-    intermediate_size: int,
-) -> tuple[int, int]:
-    """Round hidden up to 128 and intermediate up to 256 (128 for SwiGLU) for
-    AITER's per-tensor FP8 MoE kernel."""
-    intermediate_alignment = (
-        128
-        if activation in (MoEActivation.SWIGLUOAI, MoEActivation.SWIGLUOAI_UNINTERLEAVE)
-        else 256
-    )
-    return round_up(hidden_size, 128), round_up(
-        intermediate_size, intermediate_alignment
-    )
-
-
 def maybe_round_up_fp8_moe_hidden_size_and_intermediate_size(
     backend: Fp8MoeBackend,
     weight_key: QuantKey | None,
-    activation: MoEActivation,
     hidden_size: int,
     intermediate_size: int,
 ) -> tuple[int, int]:
     """Return the hidden and intermediate sizes the selected kernel needs; the
     loaded weights are zero-padded to them (see pad_fp8_moe_weights)."""
-    # These run on AITER's CK GEMM, which needs aligned sizes.
+    # AITER's CK per-tensor FP8 MoE runs stage 2 with K = the intermediate size
+    # and picks the largest KPerBlock that divides it, down to 128. A size that
+    # is not a multiple of 128 (a TP shard of 64 or 192) has no instance at all.
     if backend == Fp8MoeBackend.AITER and weight_key == kFp8StaticTensorSym:
-        return fp8_moe_round_up_sizes(activation, hidden_size, intermediate_size)
-    # AITER's CK block-FP8 MoE needs hidden to be a multiple of 256.
-    if backend == Fp8MoeBackend.AITER and weight_key == kFp8Static128BlockSym:
-        return round_up(hidden_size, 256), intermediate_size
+        return round_up(hidden_size, 128), round_up(intermediate_size, 128)
     return hidden_size, intermediate_size
 
 
@@ -145,34 +125,6 @@ def pad_fp8_moe_weights(
     padded_w2 = w2.new_zeros(w2.shape[0], hidden_size, intermediate_size)
     padded_w2[:, :unpadded_hidden_size, :unpadded_intermediate_size] = w2
 
-    # Block scales are [E, out / block, in / block]; pad them by whole blocks.
-    if (
-        w13_scale.dim() == 3
-        and w13_scale.shape[1] != num_shards * unpadded_intermediate_size
-    ):
-        block_n = num_shards * unpadded_intermediate_size // w13_scale.shape[1]
-        block_k = cdiv(unpadded_hidden_size, w13_scale.shape[2])
-        blocks, padded_blocks = (
-            unpadded_intermediate_size // block_n,
-            cdiv(intermediate_size, block_n),
-        )
-        padded_w13_scale = w13_scale.new_ones(
-            w13_scale.shape[0], num_shards * padded_blocks, cdiv(hidden_size, block_k)
-        )
-        for shard in range(num_shards):
-            padded_w13_scale[
-                :,
-                shard * padded_blocks : shard * padded_blocks + blocks,
-                : w13_scale.shape[2],
-            ] = w13_scale[:, shard * blocks : (shard + 1) * blocks]
-        padded_w2_scale = w2_scale.new_ones(
-            w2_scale.shape[0],
-            cdiv(hidden_size, block_n),
-            cdiv(intermediate_size, block_k),
-        )
-        padded_w2_scale[:, : w2_scale.shape[1], : w2_scale.shape[2]] = w2_scale
-        w13_scale, w2_scale = padded_w13_scale, padded_w2_scale
-
     return padded_w13, padded_w2, w13_scale, w2_scale
 
 
@@ -185,7 +137,6 @@ def update_fp8_moe_kernel_sizes(
         maybe_round_up_fp8_moe_hidden_size_and_intermediate_size(
             backend,
             weight_key,
-            moe_config.activation,
             moe_config.hidden_dim,
             moe_config.intermediate_size_per_partition,
         )
