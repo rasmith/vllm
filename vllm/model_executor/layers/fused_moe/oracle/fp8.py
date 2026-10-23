@@ -85,9 +85,8 @@ def maybe_round_up_fp8_moe_hidden_size_and_intermediate_size(
 ) -> tuple[int, int]:
     """Return the hidden and intermediate sizes the selected kernel needs; the
     loaded weights are zero-padded to them (see pad_fp8_moe_weights)."""
-    # AITER's CK per-tensor FP8 MoE runs stage 2 with K = the intermediate size
-    # and picks the largest KPerBlock that divides it, down to 128. A size that
-    # is not a multiple of 128 (a TP shard of 64 or 192) has no instance at all.
+    # AITER's per-tensor CK kernels use MFMA instructions that require a multiple
+    # of 128 values, so pad the hidden and intermediate sizes up.
     if backend == Fp8MoeBackend.AITER and weight_key == kFp8StaticTensorSym:
         return round_up(hidden_size, 128), round_up(intermediate_size, 128)
     return hidden_size, intermediate_size
@@ -97,13 +96,12 @@ def pad_fp8_moe_weights(
     moe_config: FusedMoEConfig,
     w13: torch.Tensor,
     w2: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
     hidden_size: int,
     intermediate_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Zero-pad loaded FP8 expert weights, and their block scales, from their
-    loaded sizes to the kernel's hidden and intermediate sizes."""
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Zero-pad loaded FP8 expert weights from their loaded sizes to the kernel's
+    hidden and intermediate sizes. Per-tensor scales are one value per expert, so
+    they do not change."""
     unpadded_hidden_size, unpadded_intermediate_size = w2.shape[1], w2.shape[2]
     num_shards = 2 if moe_config.is_act_and_mul else 1
 
@@ -125,7 +123,7 @@ def pad_fp8_moe_weights(
     padded_w2 = w2.new_zeros(w2.shape[0], hidden_size, intermediate_size)
     padded_w2[:, :unpadded_hidden_size, :unpadded_intermediate_size] = w2
 
-    return padded_w13, padded_w2, w13_scale, w2_scale
+    return padded_w13, padded_w2
 
 
 def update_fp8_moe_kernel_sizes(
@@ -155,15 +153,18 @@ def maybe_pad_fp8_moe_weights(
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Zero-pad the loaded weights to the sizes the backend needs."""
+    """Zero-pad the loaded weights to the sizes the backend needs. This also
+    records those sizes in the MoE config, so the runner pads the activations to
+    match."""
     hidden_size, intermediate_size = update_fp8_moe_kernel_sizes(
         moe_config, backend, weight_key
     )
     if (hidden_size, intermediate_size) == (w2.shape[1], w2.shape[2]):
         return w13, w2, w13_scale, w2_scale
-    return pad_fp8_moe_weights(
-        moe_config, w13, w2, w13_scale, w2_scale, hidden_size, intermediate_size
+    padded_w13, padded_w2 = pad_fp8_moe_weights(
+        moe_config, w13, w2, hidden_size, intermediate_size
     )
+    return padded_w13, padded_w2, w13_scale, w2_scale
 
 
 def _get_priority_backends(
