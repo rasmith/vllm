@@ -131,8 +131,12 @@ steps:
   - docker/docker-bake.hcl
   - docker/docker-bake-rocm.hcl
   - tests/tools/test_docker_build_metadata_args.py
+  - tests/tools/test_kernel_symbol_map.py
+  - tools/ci/kernel_symbol_map.py
+  - tools/ci/rocm_kernel_symbol_map.py
   commands:
   - pytest -v -s tools/test_docker_build_metadata_args.py
+  - pytest -v -s tools/test_kernel_symbol_map.py
 
 # Disabled until torch-abi-audit transitive dependencies are locked.
 # - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
