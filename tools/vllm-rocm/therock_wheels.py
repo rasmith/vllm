@@ -89,7 +89,12 @@ def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     index = args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]
     sdk = args["ROCM_SDK_VERSION"]
     vision_v, audio_v = args["TORCHVISION_VERSION"], args["TORCHAUDIO_VERSION"]
-    arches = [a for a in args["PYTORCH_ROCM_ARCH"].split(";") if a]
+    # gfx1250-strict code objects ship in the gfx1250 packages; it has none of its own.
+    arches = list(
+        dict.fromkeys(
+            a.removesuffix("-strict") for a in args["PYTORCH_ROCM_ARCH"].split(";") if a
+        )
+    )
     wanted: list[tuple[str, str | None]] = [
         ("rocm", sdk),
         ("rocm-sdk-core", sdk),

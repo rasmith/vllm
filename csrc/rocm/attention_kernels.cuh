@@ -2601,7 +2601,7 @@ template <typename T, int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx8 gcn_wmma16x16x16_instr(const bit16x8& inpA,
                                                           const bit16x8& inpB,
                                                           const floatx8& inpC) {
-  #if defined(__gfx1250__)
+  #if defined(__gfx1250__) || defined(__gfx1250_strict__)
   // gfx1250 (gfx12 family) does not provide the gfx12 WMMA variant used by
   // gfx1200/1201 (needs wmma-128b-insts). This custom-attention WMMA path is
   // unsupported on gfx1250; trap if ever launched (fail loud, not

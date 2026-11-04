@@ -84,6 +84,7 @@ def test_rocm_platform_module_imports():
         pytest.param("gfx1200", 12, 0, id="RDNA4-gfx1200"),
         pytest.param("gfx1201", 12, 0, id="RX9070-gfx1201"),
         pytest.param("gfx1250", 12, 5, id="CDNA5-gfx1250"),
+        pytest.param("gfx1250-strict", 12, 5, id="MI455A0-gfx1250-strict"),
     ],
 )
 def test_capability_from_gcn_arch_known_gpus(gcn_arch, expected_major, expected_minor):
