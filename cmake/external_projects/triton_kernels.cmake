@@ -13,7 +13,7 @@ else()
   if (VLLM_TARGET_DEVICE STREQUAL "rocm")
     set(TRITON_GIT "https://github.com/ROCm/triton.git")
     # Pinned from release/internal/3.8.x
-    set(TRITON_KERNELS_TAG "669b31acc1dd1b3fd93286afd5db67f65d9f7557")
+    set(TRITON_KERNELS_TAG "66b3f9ff575eb8db6adec658bbf0badd9a8d2e25")
   else()
     set(TRITON_GIT "https://github.com/triton-lang/triton.git")
     set(TRITON_KERNELS_TAG "v3.5.1")

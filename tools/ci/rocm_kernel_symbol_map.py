@@ -40,6 +40,8 @@ TARGET = re.compile(r"(?:^|/)CMakeFiles/([^/]+)\.dir/")
 # clang uses the new offload driver, which names them hip- and emits bitcode.
 DEVICE_BUNDLES = ("hipv4-amdgcn-", "hip-amdgcn-")
 DEVICE_EMIT_ACTIONS = ("-emit-obj", "-emit-llvm-bc")
+# ROCm 10.2's clang names the GPU in the device triple, e.g. amdgpu9.42-amd-amdhsa.
+DEVICE_TRIPLE = re.compile(r"(?:amdgcn|amdgpu\d+\.[0-9a-z]+)-amd-amdhsa")
 
 
 def run(command: list[str], *, cwd: Path | None = None, diagnostics=False) -> str:
@@ -434,7 +436,7 @@ def device_dependencies(
         if "-fcuda-is-device" not in frontend:
             continue
 
-        if option(frontend, "-triple") != "amdgcn-amd-amdhsa" or not any(
+        if not DEVICE_TRIPLE.fullmatch(option(frontend, "-triple")) or not any(
             a in frontend for a in DEVICE_EMIT_ACTIONS
         ):
             raise ValueError("unsupported device compiler frontend")

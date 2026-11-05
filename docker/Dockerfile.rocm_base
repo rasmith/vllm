@@ -227,6 +227,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ libdw-dev xxd libgl-dev libglx-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir CppHeaderParser
+# projects/hrr: 10.2's clr includes hrr/hrr_api_args.h from it.
 RUN git init -q /src && cd /src \
     && git remote add origin ${ROCM_SYSTEMS_REPO} \
     && git config core.sparseCheckout true \
