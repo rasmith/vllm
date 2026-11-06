@@ -10,7 +10,10 @@ set -e
 
 TORCHCODEC_REPO="${TORCHCODEC_REPO:-https://github.com/pytorch/torchcodec.git}"
 # Pin to a specific release for reproducibility; update as needed.
-TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.10.0}"
+# torch >= 2.14 headers require C++20, which torchcodec builds with from v0.14.0. Later releases
+# switch to scikit-build-core and require image codec libraries (libwebp/libheif CMake configs)
+# that Ubuntu 22.04 does not provide.
+TORCHCODEC_BRANCH="${TORCHCODEC_BRANCH:-v0.14.0}"
 # Cache directory for pre-built wheels to avoid redundant recompilation.
 TORCHCODEC_WHEEL_CACHE="${TORCHCODEC_WHEEL_CACHE:-/root/.cache/torchcodec-wheels}"
 

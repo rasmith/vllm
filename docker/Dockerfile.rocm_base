@@ -4,14 +4,22 @@ ARG REFRESH=2026-11-02
 ARG PYTHON_VERSION=3.12
 # ROCm 10.2 is only published as nightlies; every version below is from the same nightly.
 ARG ROCM_SDK_VERSION=10.2.0a20261022
-ARG TORCH_VERSION=2.13.0+rocm${ROCM_SDK_VERSION}
-ARG TORCHVISION_VERSION=0.28.0+rocm${ROCM_SDK_VERSION}
+# torch is built from source (build_torch) under the nightly's version string, which torchvision
+# pins exactly. The nightly torch, torchvision and torchaudio are installed in base first.
+ARG TORCH_VERSION=2.14.0+rocm${ROCM_SDK_VERSION}
+ARG TORCHVISION_VERSION=0.29.0+rocm${ROCM_SDK_VERSION}
 ARG TORCHAUDIO_VERSION=2.11.0.3+rocm${ROCM_SDK_VERSION}
-ARG TRITON_BRANCH="66b3f9ff" # release/internal/3.8.x as of 10/05/2026, the triton the 10.2 nightly torch pins
-ARG TRITON_VERSION=3.8.0+git66b3f9ff.rocm${ROCM_SDK_VERSION}
+ARG TORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG TORCH_BRANCH="release/2.14" # has gfx1250-strict (ROCm/pytorch#3907)
+# triton is built from source (build_triton) at the commit ROCm/pytorch release/2.14 pins in
+# .ci/docker/ci_commit_pins/triton.txt. It is on release/internal/3.9.x and has gfx1250-strict
+# (#11945); 3.8.x has none. TRITON_VERSION is the version that build produces.
+ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_COMMIT="0a6e13e6e31f18fa75a17ac72dee0dd1bcb507b8"
+ARG TRITON_VERSION=3.9.0+git0a6e13e6.rocm${ROCM_SDK_VERSION}
 ARG AITER_BRANCH="v0.1.28.post1"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.2.4"
+ARG MORI_BRANCH="jiahzhou/gfx1250-strict" # adds gfx1250-strict (ROCm/mori#874, open)
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
 ARG ROCM_RUNTIME_COMMIT="a198337ec683d594d618ec6798afd028b186fefb" # users/rasmith/10.2/hsa_gpu_edge_signal: the 10.2.0a20261022 nightly's rocm-systems commit plus the hsa_gpu_edge_signal series
@@ -89,19 +97,18 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     "rocm[libraries,devel]${ROCM_SDK_VERSION:+==${ROCM_SDK_VERSION}}" \
     && rocm-sdk init
 
-# Install PyTorch wheels, with the triton TheRock's torch pins
+# Install the nightly PyTorch wheels (with the triton they pin). The final stage replaces
+# torch and triton with the build_torch and build_triton wheels.
 ARG TORCH_VERSION
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
-ARG TRITON_VERSION
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install \
     --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
     --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
     "torch==${TORCH_VERSION}" \
     "torchaudio==${TORCHAUDIO_VERSION}" \
-    "torchvision==${TORCHVISION_VERSION}" \
-    "triton==${TRITON_VERSION}"
+    "torchvision==${TORCHVISION_VERSION}"
 
 # Install the AMD-compiled device kernels corresponding to PYTORCH_ROCM_ARCH:
 
@@ -156,6 +163,48 @@ RUN if [ -f "${SITE_PACKAGES}/rocm_sdk/__init__.py" ]; then \
         fi; \
     done \
     && ldconfig
+
+
+###
+### Triton Build
+###
+# A detached checkout of TRITON_COMMIT versions the wheel 3.9.0+git<hash8>; the suffix adds .rocm<sdk>.
+FROM base AS build_triton
+ARG TRITON_REPO
+ARG TRITON_COMMIT
+ARG ROCM_SDK_VERSION
+RUN git clone --filter=blob:none ${TRITON_REPO} triton \
+    && cd triton && git checkout -q ${TRITON_COMMIT}
+RUN --mount=type=cache,target=/root/.cache/pip cd triton \
+    && TRITON_WHEEL_VERSION_SUFFIX=".rocm${ROCM_SDK_VERSION}" MAX_JOBS=64 \
+       pip wheel --no-deps -v --wheel-dir /app/install . \
+    && ls -l /app/install
+
+###
+### PyTorch Build
+###
+# Builds for PYTORCH_ROCM_ARCH against the SDK in base. Flash/mem-efficient attention need
+# AOTriton, which has no gfx1250-strict build, so they are off (SDPA uses the math path).
+FROM base AS build_torch
+ARG TORCH_REPO
+ARG TORCH_BRANCH
+ARG TORCH_VERSION
+RUN git clone --depth 1 --branch ${TORCH_BRANCH} --recurse-submodules --shallow-submodules \
+        --jobs 16 ${TORCH_REPO} pytorch
+# The SDK clang compiles the .hip host code and emits compiler-rt calls such as __truncsfbf2
+# (float -> bf16), but the system c++ (GCC 11) links it and its libgcc lacks them. Append the
+# SDK's compiler-rt builtins to every C++ link (CMAKE_ARGS is read by scikit-build-core).
+RUN --mount=type=cache,target=/root/.cache/pip cd pytorch \
+    && pip install -r requirements.txt \
+    && python3 tools/amd_build/build_amd.py \
+    && BUILTINS="$("$SDK_DEV/lib/llvm/bin/clang" --rtlib=compiler-rt --print-libgcc-file-name)" \
+    && test -f "$BUILTINS" \
+    && USE_ROCM=1 BUILD_TEST=0 USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
+       CMAKE_PREFIX_PATH="${SDK_DEV}" PYTORCH_BUILD_VERSION="${TORCH_VERSION}" PYTORCH_BUILD_NUMBER=1 \
+       CMAKE_ARGS="-DCMAKE_CXX_STANDARD_LIBRARIES=${BUILTINS}" \
+       MAX_JOBS=128 pip wheel --no-deps --no-build-isolation -v --wheel-dir /app/install . \
+    && ! nm -D --undefined-only build/lib/libtorch_hip.so | grep -w __truncsfbf2 \
+    && ls -l /app/install
 
 
 ###
@@ -281,16 +330,11 @@ RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# The wheel index also serves TheRock's torch and the triton it pins.
-ARG TORCH_VERSION
-ARG TRITON_VERSION
-ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip download --no-deps --dest /app/debs \
-        --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-        "torch==${TORCH_VERSION}" "triton==${TRITON_VERSION}" \
+# The wheel index also serves the torch and triton built here.
+RUN --mount=type=bind,from=build_torch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs \
     && ls -l /app/debs
 
 FROM scratch AS wheels
@@ -332,6 +376,13 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libgrpc++1 libprotobuf23 \
     && rm -rf /var/lib/apt/lists/*
 
+# Replace the nightly torch and triton with the source builds. torch keeps the nightly's version
+# string, so --force-reinstall; --no-deps because the built torch declares no triton pin.
+RUN --mount=type=bind,from=build_torch,src=/app/install,target=/i/torch \
+    --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps --force-reinstall /i/torch/*.whl /i/triton/*.whl
+
 RUN --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=bind,from=build_amdsmi,src=/app/install,target=/i/amdsmi \
@@ -362,6 +413,10 @@ ARG BASE_IMAGE
 ARG PYTHON_VERSION
 ARG ROCM_SDK_VERSION
 ARG TORCH_VERSION
+ARG TORCH_REPO
+ARG TORCH_BRANCH
+ARG TRITON_REPO
+ARG TRITON_COMMIT
 ARG TORCHAUDIO_VERSION
 ARG TORCHVISION_VERSION
 ARG PYTORCH_ROCM_ARCH
@@ -377,6 +432,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
     && echo "ROCM_SDK_VERSION: ${ROCM_SDK_VERSION}" >> /app/versions.txt \
     && echo "TORCH_VERSION: ${TORCH_VERSION}" >> /app/versions.txt \
+    && echo "TORCH_SOURCE: ${TORCH_REPO} ${TORCH_BRANCH} $(python3 -c 'import torch; print(torch.version.git_version)')" >> /app/versions.txt \
+    && echo "TRITON_SOURCE: ${TRITON_REPO} ${TRITON_COMMIT}" >> /app/versions.txt \
     && echo "TORCHAUDIO_VERSION: ${TORCHAUDIO_VERSION}" >> /app/versions.txt \
     && echo "TORCHVISION_VERSION: ${TORCHVISION_VERSION}" >> /app/versions.txt \
     && echo "PYTORCH_ROCM_ARCH: ${PYTORCH_ROCM_ARCH}" >> /app/versions.txt \

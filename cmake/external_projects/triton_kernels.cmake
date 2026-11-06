@@ -12,8 +12,8 @@ if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
 else()
   if (VLLM_TARGET_DEVICE STREQUAL "rocm")
     set(TRITON_GIT "https://github.com/ROCm/triton.git")
-    # Pinned from release/internal/3.8.x
-    set(TRITON_KERNELS_TAG "66b3f9ff575eb8db6adec658bbf0badd9a8d2e25")
+    # Pinned from release/internal/3.9.x: the triton ROCm/pytorch release/2.14 pins
+    set(TRITON_KERNELS_TAG "0a6e13e6e31f18fa75a17ac72dee0dd1bcb507b8")
   else()
     set(TRITON_GIT "https://github.com/triton-lang/triton.git")
     set(TRITON_KERNELS_TAG "v3.5.1")
