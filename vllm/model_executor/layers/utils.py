@@ -513,10 +513,16 @@ def rocm_unquantized_gemm_impl(
         x_view = x.reshape(-1, x.size(-1)).contiguous()
         return ops.wvSplitKrc(x_view, weight, cu_count, bias)
 
+    # aiter's gemm_a16w16 asserts a 2D (M, K) activation, but this op is also
+    # reached with higher-rank inputs (e.g. MiniMax-M3's vision tower passes
+    # (N, 1, K)); flatten the leading dims and restore them afterwards.
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
-        return gemm_a16w16(x, weight, bias)
+        if x.dim() == 2:
+            return gemm_a16w16(x, weight, bias)
+        out = gemm_a16w16(x.reshape(-1, x.size(-1)), weight, bias)
+        return out.view(*x.shape[:-1], out.size(-1))
 
     skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
