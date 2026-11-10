@@ -1435,13 +1435,21 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
+        # Only AITER's W4A16 kernel is told about the gfx1250 scale swizzle
+        # (via swizzle_mx_scale); the OAI triton_kernels backends read the
+        # scales linearly, so they must be loaded unswizzled.
+        allow_gfx1250_swizzle = (
+            mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+        )
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
 
         w13_precision_config = PrecisionConfig(
@@ -1905,10 +1913,12 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            allow_gfx1250_swizzle=False,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            allow_gfx1250_swizzle=False,
         )
 
         w13_precision_config = PrecisionConfig(
