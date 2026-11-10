@@ -392,8 +392,8 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-# Matches Dockerfile.rocm_base TRITON_COMMIT (the triton ROCm/pytorch release/2.14 pins).
-ARG ROCM_TRITON_KERNELS_COMMIT=0a6e13e6e31f18fa75a17ac72dee0dd1bcb507b8
+# Matches Dockerfile.rocm_base TRITON_COMMIT (ROCm/triton release_for_aiter).
+ARG ROCM_TRITON_KERNELS_COMMIT=65ee8992f31b2cfdd57914a1080364c068ac9d06
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
