@@ -914,6 +914,28 @@ def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _make_mx_scales_k_major(*scales) -> None:
+    """Store mxfp4 block scales K-major, in place, for AITER's Gluon kernels.
+
+    AITER's host wrapper transposes dims 1 and 2 of both the weights and their
+    scales before launching the gfx1250 Gluon kernel
+    (aiter/ops/triton/moe/moe_op_gemm_a8w4.py). vLLM already hands the weights
+    over K-major, so that transpose leaves them contiguous in the last dim --
+    but the scales come back from ``_swizzle_mxfp4`` contiguous the other way
+    round, so after the transpose their last dim is strided and the kernel's
+    TDM descriptor rejects them:
+
+        error: last dimension must have stride 1
+
+    Re-laying the scales out K-major once here keeps the per-call path free of
+    a copy; it changes only the memory layout, not the shape or the values.
+    """
+    for scale in scales:
+        data = getattr(getattr(scale, "storage", None), "data", None)
+        if data is not None and data.dim() == 3 and data.stride(1) != 1:
+            scale.storage.data = data.transpose(1, 2).contiguous().transpose(1, 2)
+
+
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -1452,6 +1474,9 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
 
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            _make_mx_scales_k_major(w13_scale, w2_scale)
+
         w13_precision_config = PrecisionConfig(
             **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
@@ -1920,6 +1945,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             w2_weight_scale,
             allow_gfx1250_swizzle=False,
         )
+
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            _make_mx_scales_k_major(w13_scale, w2_scale)
 
         w13_precision_config = PrecisionConfig(
             **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
