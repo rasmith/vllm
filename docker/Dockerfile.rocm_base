@@ -19,11 +19,14 @@ ARG TORCH_BRANCH="release/2.14" # has gfx1250-strict (ROCm/pytorch#3907)
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG TRITON_COMMIT="65ee8992f31b2cfdd57914a1080364c068ac9d06"
 ARG TRITON_VERSION=3.9.0+git65ee8992.rocm${ROCM_SDK_VERSION}
-# ROCm/aiter main plus a gfx1250-strict fix: its Triton config lookup maps gfx1250-strict to the
-# gfx1250 config tree (AITERKER-209).
+# ROCm/aiter v0.1.29 (the pin upstream moved to) plus two gfx1250-strict fixes: the Triton
+# config lookup maps gfx1250-strict to the gfx1250 config tree (AITERKER-209), and
+# fp8_mqa_logits falls back to its Triton kernel on strict, whose Gluon kernel needs the
+# wmma 16x16x128 fp8 the A0 does not implement.
 ARG AITER_BRANCH="rasmith/gfx1250-strict"
 ARG AITER_REPO="https://github.com/rasmith/aiter.git"
-ARG MORI_BRANCH="jiahzhou/gfx1250-strict" # adds gfx1250-strict (ROCm/mori#874, open)
+# upstream is on v1.2.3.post1; this branch adds gfx1250-strict (ROCm/mori#874, open)
+ARG MORI_BRANCH="jiahzhou/gfx1250-strict"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # hipBLASLt is rebuilt (build_hipblaslt) for the -strict arches in PYTORCH_ROCM_ARCH: the SDK ships
 # no gfx1250-strict catalog (AIDEVOPS-334). Same commit as the nightly's rocm-libraries (TheRock
