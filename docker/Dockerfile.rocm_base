@@ -313,8 +313,12 @@ ARG TORCH_VERSION
 RUN git clone --depth 1 --branch ${TORCH_BRANCH} --recurse-submodules --shallow-submodules \
         --jobs 16 ${TORCH_REPO} pytorch
 # The SDK clang compiles the .hip host code and emits compiler-rt calls such as __truncsfbf2
-# (float -> bf16), but the system c++ (GCC 11) links it and its libgcc lacks them. Append the
-# SDK's compiler-rt builtins to every C++ link (CMAKE_ARGS is read by scikit-build-core).
+# (float -> bf16), but the system c++ links it and its libgcc lacks them. Append the SDK's
+# compiler-rt builtins to every C++ link (CMAKE_ARGS is read by scikit-build-core).
+# LDFLAGS: linking bin/torch_shm_manager pulls in libamdhip64.so.7, whose DT_NEEDED
+# libhsa-runtime64.so.1 sits beside it in the SDK. The 10.3 SDK records that directory only as a
+# $ORIGIN-relative DT_RPATH, which ld does not expand when resolving an indirect dependency, so
+# every hsa_* symbol comes out undefined. Name the SDK lib directories outright.
 RUN --mount=type=cache,target=/root/.cache/pip cd pytorch \
     && pip install -r requirements.txt \
     && python3 tools/amd_build/build_amd.py \
@@ -323,6 +327,7 @@ RUN --mount=type=cache,target=/root/.cache/pip cd pytorch \
     && USE_ROCM=1 BUILD_TEST=0 USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
        CMAKE_PREFIX_PATH="${SDK_DEV}" PYTORCH_BUILD_VERSION="${TORCH_VERSION}" PYTORCH_BUILD_NUMBER=1 \
        CMAKE_ARGS="-DCMAKE_CXX_STANDARD_LIBRARIES=${BUILTINS}" \
+       LDFLAGS="-Wl,-rpath-link,${SDK_DEV}/lib:${SDK_CORE}/lib:${SDK_DEV}/lib/rocm_sysdeps/lib" \
        MAX_JOBS=128 pip wheel --no-deps --no-build-isolation -v --wheel-dir /app/install . \
     && ! nm -D --undefined-only build/lib/libtorch_hip.so | grep -w __truncsfbf2 \
     && ls -l /app/install
@@ -575,7 +580,9 @@ RUN --mount=type=bind,from=build_fa,src=/app/install,target=/i/fa \
     --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=cache,target=/root/.cache/pip \
-    shopt -s nullglob && pip install /i/*/*.whl \
+    # pyyaml: aiter.dist.utils imports it, so `import aiter` fails without it, and aiter's own
+    # wheel does not declare it.
+    shopt -s nullglob && pip install pyyaml /i/*/*.whl \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
