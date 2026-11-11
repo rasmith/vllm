@@ -92,6 +92,11 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
+# --force-fallback-for=abseil-cpp: libgrpc++-dev drags in the distro's Abseil, and ubuntu 24.04's
+# (20220623) predates absl_log, which nixl requires. It ships absl_base.pc but no absl_log.pc, and
+# nixl refuses that combination outright ("Your Abseil version is too old") rather than silently
+# mixing two Abseils. Taking nixl's own abseil-cpp subproject for all of them keeps one consistent
+# version, which is exactly what its no-system-Abseil fallback path does.
 RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     git clone ${NIXL_REPO} /opt/nixl && \
     cd /opt/nixl && \
@@ -101,7 +106,8 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
                      -Ducx_path=${UCX_HOME} \
                      -Dwheel_variant=rocm \
                      -Dbuild_tests=false \
-                     -Dbuild_examples=false && \
+                     -Dbuild_examples=false \
+                     --force-fallback-for=abseil-cpp && \
     cd build && \
     ninja -j$(nproc) && \
     ninja install && \
