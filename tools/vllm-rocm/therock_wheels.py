@@ -106,8 +106,19 @@ def patch_amdsmi(src_dir: Path, out_dir: Path) -> Path:
     shutil.copytree(src_dir, out_dir, ignore=shutil.ignore_patterns("tests"))
     wrapper = out_dir / "amdsmi" / "amdsmi_wrapper.py"
     text = wrapper.read_text()
-    if text.count(_AMDSMI_ANCHOR) != 1:
-        raise SystemExit(f"amdsmi loader anchor not found in {wrapper}")
+    count = text.count(_AMDSMI_ANCHOR)
+    if count > 1:
+        raise SystemExit(f"amdsmi loader anchor is ambiguous in {wrapper}")
+    if count == 0:
+        # ROCm 10.3 rewrote the loader: it no longer builds a possible_locations
+        # list, and its last step resolves the SONAME (libamd_smi.so.27) through
+        # the dynamic linker, which finds the SDK's copy via LD_LIBRARY_PATH and
+        # /etc/ld.so.conf.d/rocm-pip.conf. Nothing to patch, so leave it alone --
+        # but fail if neither loader shape is recognisable.
+        if "_AMDSMI_LIB_SONAME" not in text:
+            raise SystemExit(f"amdsmi loader not recognised in {wrapper}")
+        print(f"amdsmi loader resolves its SONAME itself; no patch needed ({wrapper})")
+        return out_dir
     wrapper.write_text(text.replace(_AMDSMI_ANCHOR, _AMDSMI_ANCHOR + _AMDSMI_PATCH))
     return out_dir
 
@@ -180,7 +191,12 @@ def external_links(dockerfile: Path, torch_wheel: Path) -> list[str]:
     index = args["ROCM_RELEASE_WHEELS_MULTIARCH_URL"]
     sdk = args["ROCM_SDK_VERSION"]
     vision_v, audio_v = args["TORCHVISION_VERSION"], args["TORCHAUDIO_VERSION"]
-    arches = [a for a in args["PYTORCH_ROCM_ARCH"].split(";") if a]
+    # gfx1250-strict code objects ship in the gfx1250 packages; it has none of its own.
+    arches = list(
+        dict.fromkeys(
+            a.removesuffix("-strict") for a in args["PYTORCH_ROCM_ARCH"].split(";") if a
+        )
+    )
     wanted: list[tuple[str, str | None]] = [
         ("rocm", sdk),
         ("rocm-sdk-core", sdk),

@@ -8,8 +8,12 @@ FROM stack AS dev
 # Build tools plus the runtime system packages (RDMA userspace, FFmpeg for torchcodec).
 # mold is installed but not the default linker: some packages JIT-compile at runtime
 # with flags mold does not support. Build stages opt in via LDFLAGS="-fuse-ld=mold".
-RUN apt-get update -q -y -o Acquire::Retries=3 && apt-get install -q -y -o Acquire::Retries=3 \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+# msgpack: libmsgpack-dev on ubuntu 22.04, libmsgpack-cxx-dev on 24.04.
+RUN apt-get update -q -y -o Acquire::Retries=3 \
+    && { apt-get install -q -y -o Acquire::Retries=3 libmsgpack-dev \
+         || apt-get install -q -y -o Acquire::Retries=3 libmsgpack-cxx-dev; } \
+    && apt-get install -q -y -o Acquire::Retries=3 \
+    sqlite3 libsqlite3-dev libfmt-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl libnuma-dev ccache mold \
     librdmacm1 libibverbs1 ibverbs-providers ibverbs-utils util-linux unzip libsodium23 \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
@@ -88,6 +92,11 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
+# --force-fallback-for=abseil-cpp: libgrpc++-dev drags in the distro's Abseil, and ubuntu 24.04's
+# (20220623) predates absl_log, which nixl requires. It ships absl_base.pc but no absl_log.pc, and
+# nixl refuses that combination outright ("Your Abseil version is too old") rather than silently
+# mixing two Abseils. Taking nixl's own abseil-cpp subproject for all of them keeps one consistent
+# version, which is exactly what its no-system-Abseil fallback path does.
 RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     git clone ${NIXL_REPO} /opt/nixl && \
     cd /opt/nixl && \
@@ -97,7 +106,8 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
                      -Ducx_path=${UCX_HOME} \
                      -Dwheel_variant=rocm \
                      -Dbuild_tests=false \
-                     -Dbuild_examples=false && \
+                     -Dbuild_examples=false \
+                     --force-fallback-for=abseil-cpp && \
     cd build && \
     ninja -j$(nproc) && \
     ninja install && \
@@ -111,8 +121,10 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 # so configure the ROCm wheel variant directly through Meson.
 # Exclude libcore and libpull from auditwheel: transitive dependencies
 # that are not shipped in the wheel and vary across base images.
-# Tag manylinux_2_35 to match the Ubuntu 22.04 base: NIXL >= 1.5 links
-# GLIBCXX_3.4.30 symbols, which manylinux_2_34 does not allow.
+# The manylinux tag follows the base image's own glibc (2.35 on ubuntu 22.04, 2.39 on 24.04):
+# NIXL >= 1.5 links GLIBCXX_3.4.30 symbols, which manylinux_2_34 does not allow, and a tag below
+# the glibc actually built against makes auditwheel reject the wheel.
+# This wheel is only ever installed into an image built from this same base.
 RUN cd /opt/nixl && \
     ./contrib/tomlutil.py --wheel-name nixl-rocm pyproject.toml && \
     CC="ccache gcc" CXX="ccache g++" \
@@ -121,14 +133,15 @@ RUN cd /opt/nixl && \
         -Csetup-args=-Ducx_path=${UCX_HOME} \
         -Csetup-args=-Dwheel_variant=rocm \
         -Csetup-args=-Dbuild_tests=false \
-        -Csetup-args=-Dbuild_examples=false && \
+        -Csetup-args=-Dbuild_examples=false \
+        -Csetup-args=--force-fallback-for=abseil-cpp && \
     mkdir -p /tmp/nixl_wheels/repaired /app/install && \
     auditwheel repair \
         --exclude 'libamdhip64*' \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_35_$(uname -m) \
+        --plat "manylinux_$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$' | tr . _)_$(uname -m)" \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
@@ -184,7 +197,9 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     mkdir -p /app/install; \
     SETUPTOOLS_SCM_PRETEND_VERSION="${LMCACHE_VERSION}" \
     PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH}" \
-    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags}" \
+    # torch >= 2.14 headers require C++20; LMCache's setup.py passes -std=c++17, and the
+    # appended flag comes last, so it wins.
+    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags} -std=c++20" \
     BUILD_WITH_HIP=1 CXX=hipcc \
         python3 setup.py bdist_wheel --dist-dir=/app/install; \
     test "$(find /app/install -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
@@ -396,7 +411,7 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
+ARG ROCM_TRITON_KERNELS_COMMIT=65ee8992f31b2cfdd57914a1080364c068ac9d06
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
@@ -498,6 +513,10 @@ COPY cmake cmake/
 COPY csrc csrc/
 # Empty: the stack's full PYTORCH_ROCM_ARCH (release); CI passes the arches it can test.
 ARG ARCH
+# Empty: $(nproc). The RUN below already honoured $MAX_JOBS, but without this ARG a
+# --build-arg MAX_JOBS was silently dropped. Capping it also makes clang's real diagnostics
+# visible: at -j256 a compiler crash surfaces only as "unable to execute command: Aborted".
+ARG MAX_JOBS
 # setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files
 # the wheel stage repackages with the real requirements, so empty files keep a requirements bump
 # from recompiling HIP.

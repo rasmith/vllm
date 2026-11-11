@@ -1,31 +1,48 @@
-ARG BASE_IMAGE=ubuntu:22.04@sha256:5ec03bb3441e8b0bf3b4f9cd4629a1ae763010dc3035bb8da3ae6cf026486401
+ARG BASE_IMAGE=ubuntu:22.04
 # Bump to rebuild the stack (changes its key and busts every layer); upstream drift alone never does.
-ARG REFRESH=2026-10-12
+ARG REFRESH=2026-11-11
 ARG PYTHON_VERSION=3.12
-ARG TORCH_VERSION=2.13.0+rocm10.0.0
-ARG TORCHVISION_VERSION=0.28.0+rocm10.0.0
-ARG TORCHAUDIO_VERSION=2.11.0+rocm10.0.0
-ARG TRITON_BRANCH="669b31ac" # release/internal/3.8.x as of 09/29/2026
-ARG TRITON_VERSION=3.8.0+git669b31ac
+# ROCm 10.3 is only published as nightlies; every version below is from the same nightly.
+ARG ROCM_SDK_VERSION=10.3.0a20261030
+# Built from source in build_torch: the stock wheels carry no gfx1250-strict code objects.
+ARG TORCH_VERSION=2.14.0+rocm${ROCM_SDK_VERSION}
+ARG TORCHVISION_VERSION=0.29.0+rocm${ROCM_SDK_VERSION}
+ARG TORCHAUDIO_VERSION=2.11.0.3+rocm${ROCM_SDK_VERSION}
+ARG TORCH_REPO="https://github.com/ROCm/pytorch.git"
+ARG TORCH_BRANCH="release/2.14" # has gfx1250-strict (ROCm/pytorch#3907)
+# release_for_aiter (3.9.0): release/internal/3.9.x rejects the WMMA aiter's gfx1250 Gluon
+# kernels need on strict.
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
+ARG TRITON_BRANCH="65ee8992f31b2cfdd57914a1080364c068ac9d06"
+ARG TRITON_VERSION=3.9.0+git65ee8992.rocm${ROCM_SDK_VERSION}
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="v0.1.29"
-ARG AITER_REPO="https://github.com/ROCm/aiter.git"
-ARG MORI_BRANCH="v1.2.3.post1"
+# v0.1.29 plus gfx1250-strict fixes: config-tree alias, scaled WMMA for the fp8/f4 the A0 lacks,
+# and an a8w4 prefill BLOCK_N clamp. The slash in the name needs `clone --branch`, not `checkout`.
+ARG AITER_BRANCH="rasmith/gfx1250-strict"
+ARG AITER_REPO="https://github.com/rasmith/aiter.git"
+# v1.2.5 predates ROCm/mori#874 but builds cleanly under PYTORCH_ROCM_ARCH=gfx1250-strict (its
+# strict support is runtime EP/RDMA only). Use bd2e2434 if EP is needed.
+ARG MORI_BRANCH="v1.2.5"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
+# Rebuilt in build_hipblaslt: the SDK ships no gfx1250-strict catalog (AIDEVOPS-334).
+# Commit = the SDK's own, from HIPBLASLT_VERSION_TWEAK in hipblaslt-version.h.
+ARG ROCM_LIBRARIES_REPO="https://github.com/ROCm/rocm-libraries.git"
+ARG ROCM_LIBRARIES_COMMIT="db2d71e08153d4f53d67bf6b12f38a93e46dce47"
 ARG ROCM_SYSTEMS_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG ROCM_RUNTIME_COMMIT="25e14349f2606a6b95c4ccd45eb92a1835646cf2"
+# Empty: keep the SDK's ROCr/CLR. The 10.2 stack rebuilt them from a 10.2-only branch
+# (users/rasmith/10.2/hsa_gpu_edge_signal); there is no 10.3 equivalent, and an older ROCr under a
+# 10.3 SDK would be a mismatch. Set to a rocm-systems commit to re-enable the build.
+ARG ROCM_RUNTIME_COMMIT=""
 
 
 # TheRock configuration
 ARG SITE_PACKAGES=/usr/local/lib/python${PYTHON_VERSION}/dist-packages
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL="https://stable.repo.amd.com/rocm/whl-next/" # For pre-built GPU images, packages, etc.
-ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # For torch, triton, etc. wheels with latest fixes.
-ARG ROCM_SDK_VERSION=10.0.0
+ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL="https://nightly.repo.amd.com/rocm/whl-next/" # ROCm 10.3 SDK, torch and triton
 
 # Build configuration
-ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
+ARG PYTORCH_ROCM_ARCH="gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151;gfx1250;gfx1250-strict"
 ARG AITER_ROCM_ARCH="gfx942;gfx950"
 
 FROM ${BASE_IMAGE} AS base
@@ -109,14 +126,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Possible values that can be in PYTORCH_ROCM_ARCH:
 #
 # gfx90a (MI210/250), gfx942 (MI300), gfx950 (MI350), gfx1100 (7900XTX),
-# gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU)
+# gfx1101 (7800XT), gfx1200 (9070XT), gfx1201 (9070), gfx1150/1151 (Strix APU),
+# gfx1250 (MI450/MI455 B0), gfx1250-strict (MI455 A0)
 
-# For each arch in PYTORCH_ROCM_ARCH, install the precompiled GPU code that
-# PyTorch needs to run on that specific chip.
+# Install each arch's device package. gfx1250-strict has none of its own:
+# its code objects ship in the gfx1250 packages.
 SHELL ["/bin/bash", "-c"]
 RUN --mount=type=cache,target=/root/.cache/pip \
     TORCH_VER=$(python3 -c "import torch; print(torch.__version__)") \
-    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' ' '); do \
+    && for arch in $(echo "${PYTORCH_ROCM_ARCH}" | tr ';' '\n' | sed 's/-strict$//' | sort -u); do \
         echo "Installing device packages for ${arch}" \
         && pip install --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
             --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
@@ -129,8 +147,24 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN rm -f "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack+.kpack" \
          "${SITE_PACKAGES}/torch/.kpack/torch_gfx90a:xnack-.kpack"
 
+# 10.1-10.3 ship the amdsmi bindings with no packaging metadata, so build them with our own
+# pyproject after patch-amdsmi points the loader at the installed _rocm_sdk_core.
+COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
+COPY tools/vllm-rocm/amdsmi/pyproject.toml /tmp/amdsmi-pyproject.toml
 RUN --mount=type=cache,target=/root/.cache/pip \
-    cd $SITE_PACKAGES/_rocm_sdk_core/share/amd_smi && pip install .
+    set -eux; \
+    SRC="$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi"; \
+    if [ -f "$SRC/pyproject.toml" ] || [ -f "$SRC/setup.py" ]; then \
+        pip install "$SRC"; \
+    else \
+        sed -i -e 's/import regex as re/import re/' \
+            -e 's/import pybase64 as base64/import base64/' /tmp/therock_wheels.py; \
+        python3 /tmp/therock_wheels.py patch-amdsmi "$SRC" --out-dir /tmp/amd_smi; \
+        cp /tmp/amdsmi-pyproject.toml /tmp/amd_smi/pyproject.toml; \
+        pip install /tmp/amd_smi; \
+    fi; \
+    rm -rf /tmp/amd_smi /tmp/therock_wheels.py /tmp/amdsmi-pyproject.toml; \
+    python3 -c "import amdsmi; print('amdsmi', amdsmi.__file__)"
 ENV PYTHONPATH=$SITE_PACKAGES/_rocm_sdk_core/share/amd_smi
 
 # TheRock runtime fixes
@@ -187,15 +221,21 @@ RUN mkdir -p /app/install && cp /app/mori/dist/*.whl /app/install
 ###
 ### FlashAttention Build
 ###
+# FA's CK kernels have no gfx12 build at all, so with a gfx1250/gfx1250-strict-only
+# PYTORCH_ROCM_ARCH there is nothing left to compile. The stage then produces no wheel and
+# flash_attn is simply absent from the image (vLLM falls back to its Triton attention backends).
 FROM base AS build_fa
 ARG FA_BRANCH
 ARG FA_REPO
-RUN git clone ${FA_REPO}
-RUN cd flash-attention \
+RUN mkdir -p /app/install \
+    && FA_ARCHS=$(echo "${PYTORCH_ROCM_ARCH}" | tr ';' '\n' | grep -v '^gfx1[0-9][0-9][0-9]' | paste -sd';') \
+    && if [ -z "$FA_ARCHS" ]; then echo "No FA-capable arch in PYTORCH_ROCM_ARCH; skipping flash-attention"; exit 0; fi \
+    && git clone ${FA_REPO} \
+    && cd flash-attention \
     && git checkout ${FA_BRANCH} \
     && git submodule update --init \
-    && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
-RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
+    && GPU_ARCHS="$FA_ARCHS" python3 setup.py bdist_wheel --dist-dir=dist \
+    && cp dist/*.whl /app/install
 
 
 ###
@@ -211,7 +251,7 @@ RUN --mount=type=cache,target=/root/.cache/pip cd aiter \
 # AITER_USE_SYSTEM_TRITON keeps setup.py from resolving its own triton, which would
 # displace the pinned one already installed in base.
 RUN --mount=type=cache,target=/root/.cache/pip pip install pyyaml && cd aiter \
-    && PREBUILD_KERNELS=1 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
+    && PREBUILD_KERNELS=0 AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=${AITER_ROCM_ARCH} python3 setup.py bdist_wheel --dist-dir=dist \
     && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
@@ -219,18 +259,112 @@ RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 ###
 ### Triton Build
 ###
+# A detached checkout of TRITON_BRANCH versions the wheel 3.9.0+git<hash8>; the suffix adds .rocm<sdk>.
 FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
-RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && if [ ! -f setup.py ]; then cd python; fi \
-    && python3 setup.py bdist_wheel --dist-dir=dist \
-    && python3 -m wheel unpack dist/*.whl -d /tmp/triton-wheel \
-    && find /tmp/triton-wheel -name '*.so' -exec strip --strip-debug {} + \
-    && mkdir -p /app/install \
-    && python3 -m wheel pack /tmp/triton-wheel/* -d /app/install
+ARG ROCM_SDK_VERSION
+RUN git clone --filter=blob:none ${TRITON_REPO} triton \
+    && cd triton && git checkout -q ${TRITON_BRANCH}
+# Stock Triton gates more WMMA on strict than the A0 lacks, which fails aiter's Gluon gemm_a16w16.
+# Leaves gated only the 16x16x128 fp8/bf8 and 32x16x128 f4 families, which aiter's wmma_scaled covers.
+COPY docker/triton_gfx1250_strict_wmma.patch /tmp/triton_wmma.patch
+RUN cd triton && git apply --verbose /tmp/triton_wmma.patch \
+    && ! grep -n 'kWmmaRestrictedInstsFeature' third_party/amd/lib/TritonAMDGPUTransforms/WmmaGroup.cpp \
+         | grep -qE '16x16x32|iu8'
+# TRITON_BUILD_WITH_CLANG_LLD: build with clang/lld (the SDK's, on PATH), as Triton's own release
+# builds do; GCC 11 rejects the MLIR code generated by release_for_aiter's LLVM.
+RUN --mount=type=cache,target=/root/.cache/pip cd triton \
+    && TRITON_BUILD_WITH_CLANG_LLD=1 TRITON_WHEEL_VERSION_SUFFIX=".rocm${ROCM_SDK_VERSION}" MAX_JOBS=64 \
+       pip wheel --no-deps -v --wheel-dir /app/install . \
+    && ls -l /app/install
+
+
+###
+### PyTorch Build
+###
+# Builds for PYTORCH_ROCM_ARCH against the SDK in base. Flash/mem-efficient attention need
+# AOTriton, which has no gfx1250-strict build, so they are off (SDPA uses the math path).
+FROM base AS build_torch
+ARG TORCH_REPO
+ARG TORCH_BRANCH
+ARG TORCH_VERSION
+RUN git clone --depth 1 --branch ${TORCH_BRANCH} --recurse-submodules --shallow-submodules \
+        --jobs 16 ${TORCH_REPO} pytorch
+# CMAKE_ARGS: system c++ links the SDK clang's compiler-rt calls, so add its builtins.
+# LDFLAGS: 10.3 records libhsa-runtime64's dir as a $ORIGIN DT_RPATH, which ld won't expand for an
+# indirect dep, so name the SDK lib dirs outright.
+RUN --mount=type=cache,target=/root/.cache/pip cd pytorch \
+    && pip install -r requirements.txt \
+    && python3 tools/amd_build/build_amd.py \
+    && BUILTINS="$("$SDK_DEV/lib/llvm/bin/clang" --rtlib=compiler-rt --print-libgcc-file-name)" \
+    && test -f "$BUILTINS" \
+    && USE_ROCM=1 BUILD_TEST=0 USE_FLASH_ATTENTION=0 USE_MEM_EFF_ATTENTION=0 \
+       CMAKE_PREFIX_PATH="${SDK_DEV}" PYTORCH_BUILD_VERSION="${TORCH_VERSION}" PYTORCH_BUILD_NUMBER=1 \
+       CMAKE_ARGS="-DCMAKE_CXX_STANDARD_LIBRARIES=${BUILTINS}" \
+       LDFLAGS="-Wl,-rpath-link,${SDK_DEV}/lib:${SDK_CORE}/lib:${SDK_DEV}/lib/rocm_sysdeps/lib" \
+       MAX_JOBS=128 pip wheel --no-deps --no-build-isolation -v --wheel-dir /app/install . \
+    && ! nm -D --undefined-only build/lib/libtorch_hip.so | grep -w __truncsfbf2 \
+    && ls -l /app/install
+
+
+###
+### hipBLASLt Build (gfx1250-strict)
+###
+# Built only for the -strict arches in PYTORCH_ROCM_ARCH; with none, /staging stays empty and the
+# SDK's hipBLASLt is kept. CMake options follow TheRock (math-libs/BLAS), minus clients, tests and
+# rocRoller. mxDataGenerator, which TheRock's superbuild provides, is built first.
+FROM base AS build_hipblaslt
+ARG ROCM_LIBRARIES_REPO
+ARG ROCM_LIBRARIES_COMMIT
+# msgpack: libmsgpack-dev on ubuntu 22.04, libmsgpack-cxx-dev on 24.04.
+RUN apt-get update \
+    && { apt-get install -y --no-install-recommends libmsgpack-dev \
+         || apt-get install -y --no-install-recommends libmsgpack-cxx-dev; } \
+    && rm -rf /var/lib/apt/lists/*
+RUN git init -q /src && cd /src \
+    && git remote add origin ${ROCM_LIBRARIES_REPO} \
+    && git config core.sparseCheckout true \
+    && git config remote.origin.promisor true \
+    && git config remote.origin.partialclonefilter blob:none \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/hipblaslt shared/mxdatagenerator shared/origami \
+        shared/rocroller shared/stinkytofu shared/tensile \
+    && git fetch --filter=blob:none --depth 1 origin ${ROCM_LIBRARIES_COMMIT} \
+    && git checkout -q FETCH_HEAD
+RUN --mount=type=cache,target=/root/.cache/pip \
+    set -eux; \
+    mkdir -p /staging/lib; \
+    STRICT_ARCHS="$(echo "${PYTORCH_ROCM_ARCH}" | tr ';' '\n' | grep -- '-strict$' | paste -sd';')"; \
+    if [ -z "$STRICT_ARCHS" ]; then echo "No -strict arch in PYTORCH_ROCM_ARCH; keeping the SDK's hipBLASLt"; exit 0; fi; \
+    cd /src; \
+    grep -v -E '^#|^\s*$|hip-python|tox|yappi|invoke' projects/hipblaslt/tensilelite/requirements.txt > /tmp/req.txt; \
+    pip install -r /tmp/req.txt; \
+    TOOLCHAIN="-DCMAKE_C_COMPILER=$SDK_DEV/lib/llvm/bin/amdclang -DCMAKE_CXX_COMPILER=$SDK_DEV/lib/llvm/bin/amdclang++"; \
+    cmake -B /build/mxdg -G Ninja -S shared/mxdatagenerator -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/blasdeps -DCMAKE_PREFIX_PATH="$SDK_DEV" $TOOLCHAIN \
+        -DGPU_TARGETS="$STRICT_ARCHS"; \
+    cmake --build /build/mxdg; \
+    cmake --install /build/mxdg; \
+    cmake -B /build/hipblaslt -G Ninja -S projects/hipblaslt -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/opt/hipblaslt \
+        -DCMAKE_PREFIX_PATH="/opt/blasdeps;$SDK_DEV;$SDK_DEV/lib/rocm_sysdeps" $TOOLCHAIN \
+        -DGPU_TARGETS="$STRICT_ARCHS" -DHIP_PLATFORM=amd \
+        -DHIPBLASLT_ENABLE_CLIENT=OFF -DHIPBLASLT_ENABLE_BLIS=OFF -DHIPBLASLT_BUILD_TESTING=OFF \
+        -DHIPBLASLT_INSTALL_TENSILELITE_TEST_ARTIFACTS=OFF -DTENSILELITE_BUILD_TESTING=OFF \
+        -DTENSILELITE_ENABLE_CLIENT=OFF -DROCISA_USE_STABLE_ABI=ON -DHIPBLASLT_ENABLE_ROCROLLER=OFF \
+        -DHIPBLASLT_ENABLE_FETCH=OFF -DHIPBLASLT_ENABLE_THEROCK=ON; \
+    cmake --build /build/hipblaslt; \
+    cmake --install /build/hipblaslt; \
+    cd /opt/hipblaslt/lib; \
+    # Same commit as the SDK, so the same sonames; the final stage relinks these file names.
+    cp libhipblaslt.so.1.5 libtensilelite-host.so.1.0 /staging/lib/; \
+    mkdir -p /staging/lib/hipblaslt/library; \
+    cp -r hipblaslt/library/*-strict /staging/lib/hipblaslt/library/; \
+    for a in $(echo "$STRICT_ARCHS" | tr ';' ' '); do \
+        test -f "/staging/lib/hipblaslt/library/$a/TensileLibrary_lazy_$a.dat.zlib"; \
+    done; \
+    ls -l /staging/lib /staging/lib/hipblaslt/library
 
 
 ###
@@ -246,7 +380,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends g++ libdw-dev xxd libgl-dev libglx-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir CppHeaderParser
-RUN git init -q /src && cd /src \
+# With ROCM_RUNTIME_COMMIT empty the whole build is skipped and /staging stays empty, so the
+# final stage copies nothing and the SDK's own ROCr/CLR are kept.
+RUN mkdir -p /staging/lib
+RUN test -n "${ROCM_RUNTIME_COMMIT}" || exit 0; \
+    git init -q /src && cd /src \
     && git remote add origin ${ROCM_SYSTEMS_REPO} \
     && git config core.sparseCheckout true \
     && git config remote.origin.promisor true \
@@ -259,7 +397,8 @@ RUN git init -q /src && cd /src \
 # /usr/include/libelf.h -- so ROCr links against the copy the wheel itself was built against.
 ENV SYSDEPS="$SDK_DEV/lib/rocm_sysdeps"
 # ROCr first, and installed into $SDK_DEV, because the clr build below needs its headers.
-RUN cd /src/projects/rocr-runtime \
+RUN test -n "${ROCM_RUNTIME_COMMIT}" || exit 0; \
+    cd /src/projects/rocr-runtime \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_PREFIX_PATH="$SDK_DEV;$SYSDEPS" \
@@ -269,7 +408,8 @@ RUN cd /src/projects/rocr-runtime \
     && cmake --build build --parallel 16 \
     && cmake --install build \
     && cmake --install build --prefix /rocr-install --strip
-RUN cd /src/projects/clr \
+RUN test -n "${ROCM_RUNTIME_COMMIT}" || exit 0; \
+    cd /src/projects/clr \
     && cmake -B build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCLR_BUILD_HIP=ON \
@@ -282,7 +422,8 @@ RUN cd /src/projects/clr \
         -DHIP_LLVM_ROOT="$SDK_DEV/lib/llvm" \
     && cmake --build build --parallel 16 \
     && cmake --install build --prefix /clr-install --strip
-RUN mkdir -p /staging/lib \
+RUN test -n "${ROCM_RUNTIME_COMMIT}" || exit 0; \
+    mkdir -p /staging/lib \
     && cp -P /rocr-install/lib/libhsa-runtime64.so* /staging/lib/ \
     && cp -P /clr-install/lib/libamdhip64.so* /staging/lib/ \
     && ls -l /staging/lib
@@ -298,31 +439,31 @@ RUN mkdir /app/debs
 RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_fa,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+    cp /install/*.whl /app/debs 2>/dev/null || true
 RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# The wheel index also serves a torch repacked to require our triton instead of
-# the one TheRock built it with, and amdsmi, which TheRock ships only as sources
-# inside rocm-sdk-core.
+# The wheel index also serves the torch built here (build_torch), which declares no triton pin
+# at all and so needs no repack, and amdsmi, which TheRock ships only as sources inside
+# rocm-sdk-core.
+RUN --mount=type=bind,from=build_torch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 ARG TORCH_VERSION
 ARG ROCM_RELEASE_WHEELS_MULTIARCH_URL
 ARG ROCM_NIGHTLY_WHEELS_MULTIARCH_URL
 COPY tools/vllm-rocm/therock_wheels.py /tmp/therock_wheels.py
+COPY tools/vllm-rocm/amdsmi/pyproject.toml /tmp/amdsmi-pyproject.toml
 # regex and pybase64 aren't installed here; fall back to the stdlib modules.
+# The SDK's share/amd_smi carries no packaging metadata (see base), so supply ours unless a
+# future SDK ships its own.
 RUN --mount=type=cache,target=/root/.cache/pip \
     sed -i -e 's/import regex as re/import re/' \
         -e 's/import pybase64 as base64/import base64/' /tmp/therock_wheels.py \
-    && pip download --no-deps --dest /tmp/torch-dl \
-        --index-url ${ROCM_RELEASE_WHEELS_MULTIARCH_URL} \
-        --extra-index-url ${ROCM_NIGHTLY_WHEELS_MULTIARCH_URL} \
-        "torch==${TORCH_VERSION}" \
-    && TRITON_VER=$(basename /app/debs/triton-*.whl | cut -d- -f2) \
-    && python3 /tmp/therock_wheels.py repack-torch /tmp/torch-dl/torch-*.whl \
-        --triton-version "${TRITON_VER}" --out-dir /app/debs \
     && python3 /tmp/therock_wheels.py patch-amdsmi "${SDK_CORE}/share/amd_smi" \
         --out-dir /tmp/amd_smi \
+    && { [ -f /tmp/amd_smi/pyproject.toml ] || [ -f /tmp/amd_smi/setup.py ] \
+         || cp /tmp/amdsmi-pyproject.toml /tmp/amd_smi/pyproject.toml; } \
     && pip wheel --no-deps --wheel-dir /app/debs /tmp/amd_smi \
-    && rm -rf /tmp/torch-dl /tmp/amd_smi /tmp/therock_wheels.py \
+    && rm -rf /tmp/amd_smi /tmp/therock_wheels.py /tmp/amdsmi-pyproject.toml \
     && ls -l /app/debs
 
 FROM scratch AS wheels
@@ -330,11 +471,14 @@ COPY --from=wheels-build /app/debs /
 
 FROM base AS final
 ARG TRITON_VERSION
-LABEL ai.vllm.rocm.variant=rocm100
+LABEL ai.vllm.rocm.variant=rocm103
 
 # torch 2.12 implicitly attaches rocprofiler-sdk; its queue interposition hangs at HSA
 # teardown, so disable it. TODO: drop once ROCm's stock rocprofiler carries the fix.
 ENV ROCPROFILER_QUEUE_INTERPOSITION=0
+# Report gfx1250-strict on MI455 A0 so its strict code objects are used. ROCr reports plain
+# gfx1250 by default until AIRUNTIME-2766; this has no effect on any other GPU.
+ENV HSA_DISABLE_GFX12_STRICT=0
 
 COPY --from=build_rocm_runtime /staging/lib/ ${SDK_DEV}/lib/
 # Hard link the patched library onto every stock file name, in both SDK trees, so that the
@@ -353,28 +497,67 @@ RUN set -eux; \
         [ "$f" -ef "$ours" ] || ln -f "$ours" "$f"; \
     done
 
+# Install the build_hipblaslt library, if it built one, the same way: its strict catalogs go into
+# both SDK trees (librocblas and libhipblaslt look for them next to whichever copy was loaded), and
+# the libraries are hard linked onto every stock file name.
+RUN --mount=type=bind,from=build_hipblaslt,src=/staging/lib,target=/hipblaslt \
+    set -eux; \
+    [ -f /hipblaslt/libhipblaslt.so.1.5 ] || exit 0; \
+    SDK_LIBS="$SITE_PACKAGES/_rocm_sdk_libraries"; \
+    for d in "$SDK_DEV/lib" "$SDK_LIBS/lib"; do \
+        mkdir -p "$d/hipblaslt/library"; \
+        cp -r /hipblaslt/hipblaslt/library/. "$d/hipblaslt/library/"; \
+    done; \
+    mkdir -p /opt/hipblaslt-strict; \
+    cp /hipblaslt/libhipblaslt.so.1.5 /hipblaslt/libtensilelite-host.so.1.0 /opt/hipblaslt-strict/; \
+    for f in "$SDK_DEV"/lib/libhipblaslt.so* "$SDK_LIBS"/lib/libhipblaslt.so* \
+             "$SDK_DEV"/lib/libtensilelite-host.so* "$SDK_LIBS"/lib/libtensilelite-host.so*; do \
+        [ -f "$f" ] && [ ! -L "$f" ] || continue; \
+        case "${f##*/}" in libhipblaslt*) ours=/opt/hipblaslt-strict/libhipblaslt.so.1.5;; \
+                           *) ours=/opt/hipblaslt-strict/libtensilelite-host.so.1.0;; esac; \
+        ln -f "$ours" "$f"; \
+    done
+
 RUN ldconfig
+
+# Runtime libraries of mori's UMBP extension. The soname is in the package name and changes with
+# the distro (libgrpc++1/libprotobuf23 on 22.04, libgrpc++1.51t64/libprotobuf32t64 on 24.04), so
+# resolve them from the archive instead of hard coding. `from mori.cpp import UMBPClient` below
+# fails the build if this picked the wrong ones.
+RUN apt-get update \
+    && GRPC=$(apt-cache --names-only search '^libgrpc\+\+[0-9]' | cut -d' ' -f1 | sort | tail -1) \
+    && PROTOBUF=$(apt-cache --names-only search '^libprotobuf[0-9]' | cut -d' ' -f1 | sort | tail -1) \
+    && echo "mori UMBP runtime: $GRPC $PROTOBUF" \
+    && test -n "$GRPC" && test -n "$PROTOBUF" \
+    && apt-get install -y --no-install-recommends "$GRPC" "$PROTOBUF" \
+    && rm -rf /var/lib/apt/lists/*
+
+# Replace the nightly torch and triton with the source builds. The nightly torch has no
+# gfx1250-strict code objects at all (AIDEVOPS-334), which is the whole reason build_torch exists.
+# torch keeps the nightly's version string, so --force-reinstall; --no-deps because the built
+# torch declares no triton pin.
+RUN --mount=type=bind,from=build_torch,src=/app/install,target=/i/torch \
+    --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
+    --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-deps --force-reinstall /i/torch/*.whl /i/triton/*.whl
 
 # This is to prevent resolvers from checking METADATA and RECORD and clobbering
 # the Triton source build we installed. Constraints files are unable to help
 # with this. However, these entries are optional and can be blanked which
-# solves the problem.
+# solves the problem. The source-built torch usually declares no triton pin at all.
 RUN TORCH_DIST_INFO=$(ls -d ${SITE_PACKAGES}/torch-*.dist-info) \
-    && grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA" \
-    && sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"
+    && if grep -q '^Requires-Dist: triton' "$TORCH_DIST_INFO/METADATA"; then \
+        sed -i '/^Requires-Dist: triton/d' "$TORCH_DIST_INFO/METADATA"; \
+        sed -i "s|^\(${TORCH_DIST_INFO##*/}/METADATA\),.*|\1,,|" "$TORCH_DIST_INFO/RECORD"; \
+    fi
 
-# Runtime libraries of mori's UMBP extension.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgrpc++1 libprotobuf23 \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN --mount=type=bind,from=build_triton,src=/app/install,target=/i/triton \
-    --mount=type=bind,from=build_fa,src=/app/install,target=/i/fa \
+RUN --mount=type=bind,from=build_fa,src=/app/install,target=/i/fa \
     --mount=type=bind,from=build_aiter,src=/app/install,target=/i/aiter \
     --mount=type=bind,from=build_mori,src=/app/install,target=/i/mori \
     --mount=type=cache,target=/root/.cache/pip \
-    pip install /i/*/*.whl \
+    # pyyaml: aiter.dist.utils imports it, so `import aiter` fails without it, and aiter's own
+    # wheel does not declare it.
+    shopt -s nullglob && pip install pyyaml /i/*/*.whl \
     && ! pip check 2>&1 | grep -iE '^(torch|triton) ' \
     && test "$(pip show triton | awk '/^Version:/ {print $2}')" = "${TRITON_VERSION}" \
     # Create a constraints file to protect the versions we need, especially
@@ -414,6 +597,10 @@ ARG MORI_BRANCH
 ARG MORI_REPO
 ARG ROCM_SYSTEMS_REPO
 ARG ROCM_RUNTIME_COMMIT
+ARG ROCM_LIBRARIES_REPO
+ARG ROCM_LIBRARIES_COMMIT
+ARG TORCH_REPO
+ARG TORCH_BRANCH
 ARG TRITON_VERSION
 RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTHON_VERSION: ${PYTHON_VERSION}" >> /app/versions.txt \
@@ -432,6 +619,8 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "MORI_BRANCH: ${MORI_BRANCH}" >> /app/versions.txt \
     && echo "MORI_REPO: ${MORI_REPO}" >> /app/versions.txt \
     && echo "ROCM_SYSTEMS_REPO: ${ROCM_SYSTEMS_REPO}" >> /app/versions.txt \
-    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT}" >> /app/versions.txt \
+    && echo "ROCM_RUNTIME_COMMIT: ${ROCM_RUNTIME_COMMIT:-(SDK stock ROCr/CLR)}" >> /app/versions.txt \
+    && echo "TORCH_SOURCE: ${TORCH_REPO} ${TORCH_BRANCH} $(python3 -c 'import torch; print(torch.version.git_version)')" >> /app/versions.txt \
+    && echo "HIPBLASLT_SOURCE: ${ROCM_LIBRARIES_REPO} ${ROCM_LIBRARIES_COMMIT} (gfx1250-strict: $(ls /opt/hipblaslt-strict 2>/dev/null | tr '\n' ' '))" >> /app/versions.txt \
     && echo "TRITON_VERSION: $(pip show triton | awk '/^Version:/ {print $2}')" >> /app/versions.txt \
     && echo "PYBIND11_VERSION: $(pip show pybind11 | awk '/^Version:/ {print $2}')" >> /app/versions.txt

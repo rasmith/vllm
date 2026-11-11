@@ -186,8 +186,24 @@ def _query_gcn_arch_from_amdsmi() -> str:
         # e.g., 'gfx942' for MI300X/MI325X
         target_gfx = asic_info.get("target_graphics_version", "")
         if target_gfx:
-            return target_gfx
+            return _apply_gfx1250_strict_naming(target_gfx, asic_info.get("rev_id"))
     raise RuntimeError("amdsmi did not return valid GCN arch")
+
+
+def _apply_gfx1250_strict_naming(target_gfx: str, rev_id: str | int | None) -> str:
+    """Return the agent name ROCr reports, which amdsmi does not apply.
+
+    amdsmi reports the KFD name ("gfx1250") for MI455 A0, while ROCr names the same
+    device "gfx1250-strict" when HSA_DISABLE_GFX12_STRICT=0 (opt-in until
+    AIRUNTIME-2766). Strict applies to revision 0 silicon only, as in rocBLAS.
+    """
+    if target_gfx != "gfx1250" or os.environ.get("HSA_DISABLE_GFX12_STRICT") != "0":
+        return target_gfx
+    try:
+        revision = int(rev_id, 0) if isinstance(rev_id, str) else int(rev_id)
+    except (TypeError, ValueError):
+        return target_gfx
+    return "gfx1250-strict" if revision == 0 else target_gfx
 
 
 @with_amdsmi_context
@@ -228,6 +244,8 @@ _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 _ON_GFX1250 = "gfx1250" in _GCN_ARCH
+# MI455 A0 with ROCr's strict naming on (HSA_DISABLE_GFX12_STRICT=0). Also counts as gfx1250.
+_ON_GFX1250_STRICT = "gfx1250-strict" in _GCN_ARCH
 
 _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
@@ -336,6 +354,10 @@ def on_gfx12x() -> bool:
 
 def on_gfx1250() -> bool:
     return _ON_GFX1250
+
+
+def on_gfx1250_strict() -> bool:
+    return _ON_GFX1250_STRICT
 
 
 def on_rdna4() -> bool:

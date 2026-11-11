@@ -1538,7 +1538,14 @@ def get_rocm_device_requirements() -> list[str]:
     """
     if not _is_hip() or importlib.util.find_spec("rocm_sdk") is None:
         return []
-    arches = [a for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";") if a]
+    # gfx1250-strict code objects ship in the gfx1250 packages; it has none of its own.
+    arches = list(
+        dict.fromkeys(
+            a.removesuffix("-strict")
+            for a in os.getenv("PYTORCH_ROCM_ARCH", "").split(";")
+            if a
+        )
+    )
     return [
         f"{pkg}[device-{arch}]"
         for pkg in ("torch", "torchvision", "rocm")
