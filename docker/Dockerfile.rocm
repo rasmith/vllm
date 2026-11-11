@@ -8,8 +8,12 @@ FROM stack AS dev
 # Build tools plus the runtime system packages (RDMA userspace, FFmpeg for torchcodec).
 # mold is installed but not the default linker: some packages JIT-compile at runtime
 # with flags mold does not support. Build stages opt in via LDFLAGS="-fuse-ld=mold".
-RUN apt-get update -q -y -o Acquire::Retries=3 && apt-get install -q -y -o Acquire::Retries=3 \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+# msgpack: libmsgpack-dev on ubuntu 22.04, libmsgpack-cxx-dev on 24.04.
+RUN apt-get update -q -y -o Acquire::Retries=3 \
+    && { apt-get install -q -y -o Acquire::Retries=3 libmsgpack-dev \
+         || apt-get install -q -y -o Acquire::Retries=3 libmsgpack-cxx-dev; } \
+    && apt-get install -q -y -o Acquire::Retries=3 \
+    sqlite3 libsqlite3-dev libfmt-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl libnuma-dev ccache mold \
     librdmacm1 libibverbs1 ibverbs-providers ibverbs-utils util-linux unzip libsodium23 \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
@@ -396,7 +400,7 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
+ARG ROCM_TRITON_KERNELS_COMMIT=65ee8992f31b2cfdd57914a1080364c068ac9d06
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
@@ -498,6 +502,10 @@ COPY cmake cmake/
 COPY csrc csrc/
 # Empty: the stack's full PYTORCH_ROCM_ARCH (release); CI passes the arches it can test.
 ARG ARCH
+# Empty: $(nproc). The RUN below already honoured $MAX_JOBS, but without this ARG a
+# --build-arg MAX_JOBS was silently dropped. Capping it also makes clang's real diagnostics
+# visible: at -j256 a compiler crash surfaces only as "unable to execute command: Aborted".
+ARG MAX_JOBS
 # setup.py reads requirements/rocm.txt for install_requires. This wheel only carries the .so files
 # the wheel stage repackages with the real requirements, so empty files keep a requirements bump
 # from recompiling HIP.
