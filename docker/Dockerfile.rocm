@@ -121,8 +121,10 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
 # so configure the ROCm wheel variant directly through Meson.
 # Exclude libcore and libpull from auditwheel: transitive dependencies
 # that are not shipped in the wheel and vary across base images.
-# Tag manylinux_2_35 to match the Ubuntu 22.04 base: NIXL >= 1.5 links
-# GLIBCXX_3.4.30 symbols, which manylinux_2_34 does not allow.
+# The manylinux tag follows the base image's own glibc (2.35 on ubuntu 22.04, 2.39 on 24.04):
+# NIXL >= 1.5 links GLIBCXX_3.4.30 symbols, which manylinux_2_34 does not allow, and a tag below
+# the glibc actually built against makes auditwheel reject the wheel.
+# This wheel is only ever installed into an image built from this same base.
 RUN cd /opt/nixl && \
     ./contrib/tomlutil.py --wheel-name nixl-rocm pyproject.toml && \
     CC="ccache gcc" CXX="ccache g++" \
@@ -131,14 +133,15 @@ RUN cd /opt/nixl && \
         -Csetup-args=-Ducx_path=${UCX_HOME} \
         -Csetup-args=-Dwheel_variant=rocm \
         -Csetup-args=-Dbuild_tests=false \
-        -Csetup-args=-Dbuild_examples=false && \
+        -Csetup-args=-Dbuild_examples=false \
+        -Csetup-args=--force-fallback-for=abseil-cpp && \
     mkdir -p /tmp/nixl_wheels/repaired /app/install && \
     auditwheel repair \
         --exclude 'libamdhip64*' \
         --exclude 'libcore*' \
         --exclude 'libpull*' \
         /tmp/nixl_wheels/nixl_rocm*.whl \
-        --plat manylinux_2_35_$(uname -m) \
+        --plat "manylinux_$(ldd --version | head -1 | grep -oE '[0-9]+\.[0-9]+$' | tr . _)_$(uname -m)" \
         --wheel-dir /tmp/nixl_wheels/repaired && \
     ./contrib/wheel_add_ucx_plugins.py \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
