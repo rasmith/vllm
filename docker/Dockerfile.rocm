@@ -188,7 +188,9 @@ RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     mkdir -p /app/install; \
     SETUPTOOLS_SCM_PRETEND_VERSION="${LMCACHE_VERSION}" \
     PYTORCH_ROCM_ARCH="${LMCACHE_ROCM_ARCH}" \
-    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags}" \
+    # torch >= 2.14 headers require C++20; LMCache's setup.py passes -std=c++17, and the
+    # appended flag comes last, so it wins.
+    HIPCC_COMPILE_FLAGS_APPEND="${offload_flags} -std=c++20" \
     BUILD_WITH_HIP=1 CXX=hipcc \
         python3 setup.py bdist_wheel --dist-dir=/app/install; \
     test "$(find /app/install -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
