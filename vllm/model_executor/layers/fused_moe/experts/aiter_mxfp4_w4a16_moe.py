@@ -62,7 +62,11 @@ def _aiter_w4a16_silu_via_a8w4(
     g1_gammas = gammas if apply_router_weight_on_input else None
     g2_gammas = None if apply_router_weight_on_input else gammas
 
-    hidden_q, a1_scale = dynamic_mxfp8_quant(hidden_states, quant_dtype=quant_dtype)
+    # This helper only runs on gfx1250, where AITER's Gluon mxfp8 quant kernel
+    # violates the TDM padding limits for these shapes. The Triton kernel does not.
+    hidden_q, a1_scale = dynamic_mxfp8_quant(
+        hidden_states, quant_dtype=quant_dtype, backend="triton"
+    )
     raw_gate_up = moe_gemm_a8w4(
         hidden_q,
         w1_data,

@@ -62,8 +62,14 @@ def mx_scale_kwargs(scale):
     return {"weight_scale": scale}
 
 
-def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
-    """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel."""
+def _swizzle_mxfp4(quant_tensor, scale, num_warps=8, allow_gfx1250_swizzle=True):
+    """Weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel.
+
+    ``allow_gfx1250_swizzle=False`` keeps the gfx1250 block-scale layout linear.
+    Only AITER's kernels take a ``swizzle_mx_scale`` argument; the OAI
+    triton_kernels backends have no such parameter and read the scales as a
+    linear buffer, so swizzling for them silently corrupts the output.
+    """
     assert has_triton_kernels()
     if get_triton_kernels_version() == "3.8":
         # 3.8: matmul_ogs_details -> matmul_details
@@ -155,7 +161,7 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
 
-    if should_use_gfx1250_mx_scale_swizzle():
+    if allow_gfx1250_swizzle and should_use_gfx1250_mx_scale_swizzle():
         from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
 
         assert (

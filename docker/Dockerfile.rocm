@@ -511,6 +511,14 @@ ARG ARCH
 # empty; sccache shares per-file results in S3 through the agent's instance role. setup.py prefers
 # sccache when it is on PATH; without S3 access it is removed and ccache compiles as in CI.
 ARG SCCACHE_BUCKET_NAME
+# Without this the RUN below falls back to $(nproc); at high counts a compiler abort here is
+# reported as a bare "Aborted (core dumped)" that hides the real diagnostic.
+ARG MAX_JOBS
+# Extra cmake args for the csrc build; setup.py appends $CMAKE_ARGS to its own.
+ARG CMAKE_ARGS
+# cmake seeds CMAKE_HIP_FLAGS from $HIPFLAGS, which takes values containing spaces (CMAKE_ARGS is
+# whitespace-split by setup.py and cannot).
+ARG HIPFLAGS
 RUN --mount=type=cache,id=vllm-rocm-ccache,target=/root/.cache/ccache \
     --mount=type=bind,source=tools/ci/rocm_kernel_symbol_map.py,target=/tmp/rocm_kernel_symbol_map.py \
     mkdir -p requirements && : > requirements/rocm.txt \

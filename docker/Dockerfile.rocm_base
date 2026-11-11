@@ -26,7 +26,9 @@ ARG TRITON_VERSION=3.9.0+git65ee8992.rocm${ROCM_SDK_VERSION}
 ARG AITER_BRANCH="rasmith/gfx1250-strict"
 ARG AITER_REPO="https://github.com/rasmith/aiter.git"
 # upstream is on v1.2.3.post1; this branch adds gfx1250-strict (ROCm/mori#874, open)
-ARG MORI_BRANCH="jiahzhou/gfx1250-strict"
+# jiahzhou/gfx1250-strict was merged upstream (bd2e2434) and deleted; v1.2.5 builds clean under
+# strict. Use bd2e2434 if expert parallelism on strict is ever needed.
+ARG MORI_BRANCH="v1.2.5"
 ARG MORI_REPO="https://github.com/ROCm/mori.git"
 # hipBLASLt is rebuilt (build_hipblaslt) for the -strict arches in PYTORCH_ROCM_ARCH: the SDK ships
 # no gfx1250-strict catalog (AIDEVOPS-334). Same commit as the nightly's rocm-libraries (TheRock

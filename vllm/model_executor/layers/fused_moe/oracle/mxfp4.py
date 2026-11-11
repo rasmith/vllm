@@ -914,6 +914,19 @@ def _interleave_gate_up_rows(t: torch.Tensor) -> torch.Tensor:
     )
 
 
+def _make_mx_scales_k_major(*scales) -> None:
+    """Store mxfp4 block scales K-major, in place, for AITER's Gluon kernels.
+
+    AITER transposes dims 1 and 2 before launch; the scales leave _swizzle_mxfp4
+    contiguous the other way, so their last dim ends up strided and the TDM
+    descriptor rejects them. Changes layout only, not shape or values.
+    """
+    for scale in scales:
+        data = getattr(getattr(scale, "storage", None), "data", None)
+        if data is not None and data.dim() == 3 and data.stride(1) != 1:
+            scale.storage.data = data.transpose(1, 2).contiguous().transpose(1, 2)
+
+
 def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
     mxfp4_backend: Mxfp4MoeBackend,
     layer: torch.nn.Module,
@@ -1435,14 +1448,25 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
+        # Only AITER's W4A16 kernel is told about the gfx1250 scale swizzle
+        # (via swizzle_mx_scale); the OAI triton_kernels backends read the
+        # scales linearly, so they must be loaded unswizzled.
+        allow_gfx1250_swizzle = (
+            mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+        )
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
+
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            _make_mx_scales_k_major(w13_scale, w2_scale)
 
         w13_precision_config = PrecisionConfig(
             **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
@@ -1902,14 +1926,25 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         if w2_bias is not None:
             w2_bias = w2_bias.to(torch.float32)
 
+        # Same contract as the converter above: only AITER's W4A16 kernel is told
+        # about the swizzle, so only its scales may be swizzled. It does reach
+        # this branch -- it is in TRITON_BACKENDS.
+        allow_gfx1250_swizzle = (
+            mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16
+        )
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             w13_weight,
             w13_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
         w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
             w2_weight,
             w2_weight_scale,
+            allow_gfx1250_swizzle=allow_gfx1250_swizzle,
         )
+
+        if mxfp4_backend == Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16:
+            _make_mx_scales_k_major(w13_scale, w2_scale)
 
         w13_precision_config = PrecisionConfig(
             **_mx_scale_kwargs(w13_scale), flex_ctx=FlexCtx(rhs_data=w13_flex)
