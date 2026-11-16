@@ -152,7 +152,7 @@ __global__ void __launch_bounds__(kThreads)
                         const int32_t* __restrict__ lengths,
                         int32_t* __restrict__ output, int64_t stride,
                         int max_length) {
-  extern __shared__ __align__(16) unsigned char smem[];
+  extern __shared__ VLLM_DYN_SMEM_ALIGN(16) unsigned char smem[];
   auto& s = *reinterpret_cast<Storage*>(smem);
   const int tid = threadIdx.x;
   const int length = max(0, min(lengths[blockIdx.x], max_length));

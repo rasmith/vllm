@@ -14,6 +14,18 @@
 #include "topk_histogram_4096.cuh"
 #include "persistent_topk_overflow.cuh"
 
+// An explicit alignment on an extern __shared__ array makes ROCm 10.2's AMDGPU backend re-pad the
+// dynamic LDS start past the offset AMDGPULowerModuleLDS recorded, and it aborts with
+// "Inconsistent metadata on dynamic LDS variable". Only gfx1250-strict is affected; ROCm 10.3
+// (HIP 7.18) fixes it, so the workaround expires on its own.
+#if defined(__gfx1250_strict__) && defined(HIP_VERSION_MAJOR) && \
+    (HIP_VERSION_MAJOR < 7 ||                                    \
+     (HIP_VERSION_MAJOR == 7 && HIP_VERSION_MINOR < 18))
+  #define VLLM_DYN_SMEM_ALIGN(n)
+#else
+  #define VLLM_DYN_SMEM_ALIGN(n) __align__(n)
+#endif
+
 namespace vllm {
 namespace persistent {
 
@@ -806,7 +818,7 @@ template <typename DType, typename IdType, int VEC_SIZE, uint32_t MAX_K,
 __device__ __forceinline__ bool filtered_topk_row(
     const DType* score, IdType* dst, int length, uint32_t top_k,
     FilteredTopKStorage<MAX_K, UseWideCoarse>& storage, uint32_t num_rows = 0) {
-  extern __shared__ __align__(16) uint8_t dynamic_smem[];
+  extern __shared__ VLLM_DYN_SMEM_ALIGN(16) uint8_t dynamic_smem[];
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
   using Traits = FilteredTopKTraits<float, UseWideCoarse>;
